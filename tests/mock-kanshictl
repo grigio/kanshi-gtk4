@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Minimal `kanshictl` stand-in for the integration tests.
+
+    mock-kanshictl status   exit 0, prints "Current profile: <first profile>"
+    mock-kanshictl reload   parse $MOCK_KANSHI_CONFIG and apply its first
+                            profile to the display state in $MOCK_WLR_STATE
+
+Failure injection (all optional):
+    MOCK_KANSHI_STATUS_FAIL=1     status exits 1 (daemon not running)
+    MOCK_KANSHI_RELOAD_FAIL=1     reload exits 1 (invalid config)
+    MOCK_KANSHI_IGNORE_ENABLE=1   never switch a disabled head on, like
+                                  kanshi 1.9 on labwc
+    MOCK_KANSHI_LOG=path          append one line per invocation
+"""
+
+import json
+import os
+import sys
+
+STATE = os.environ["MOCK_WLR_STATE"]
+CONFIG = os.environ["MOCK_KANSHI_CONFIG"]
+LOG = os.environ.get("MOCK_KANSHI_LOG")
+
+
+def log(message):
+    if LOG:
+        with open(LOG, "a", encoding="utf-8") as handle:
+            handle.write(message + "\n")
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def parse_profiles(text):
+    """Return every profile as {name, outputs: {name: settings}}."""
+    profiles = []
+    profile = None
+    output = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if profile is None:
+            if line.startswith("profile ") and line.endswith("{"):
+                name = line[len("profile ") : -1].strip()
+                profile = {"name": name, "outputs": {}}
+            continue
+        if output is not None:
+            if line == "}":
+                profile["outputs"][output["name"]] = output
+                output = None
+                continue
+            key, _, value = line.partition(" ")
+            if key == "mode":
+                output["mode"] = value.strip()
+            elif key == "position":
+                output["position"] = value.strip()
+            elif key == "scale":
+                output["scale"] = float(value)
+            elif key == "transform":
+                output["transform"] = value.strip()
+            elif key == "adaptive_sync":
+                output["adaptive_sync"] = value.strip() == "on"
+            continue
+        if line == "}":
+            profiles.append(profile)
+            profile = None
+            continue
+        parts = line.split()
+        if parts and parts[0] == "output":
+            name = parts[1]
+            if len(parts) >= 3 and parts[2] == "disable":
+                profile["outputs"][name] = {"name": name, "enabled": False}
+            else:
+                output = {"name": name, "enabled": True}
+    return profiles
+
+
+def apply_profile(profile):
+    ignore_dark_heads = os.environ.get("MOCK_KANSHI_IGNORE_ENABLE") == "1"
+    with open(STATE, encoding="utf-8") as handle:
+        data = json.load(handle)
+    for output in data:
+        settings = profile["outputs"].get(output["name"])
+        if settings is None:
+            continue
+        if not settings.get("enabled", True):
+            output["enabled"] = False
+            continue
+        if ignore_dark_heads and not output["enabled"]:
+            # kanshi 1.9 on labwc applies the profile but leaves the head off.
+            continue
+        output["enabled"] = True
+        mode_value = settings.get("mode")
+        if mode_value:
+            size, _, refresh = mode_value.partition("@")
+            width, height = size.split("x")
+            matches = [
+                mode
+                for mode in output["modes"]
+                if mode["width"] == int(width) and mode["height"] == int(height)
+            ]
+            if not matches:
+                fail(f"profile {profile['name']} uses an unknown mode {mode_value}")
+            chosen = matches[0]
+            if refresh:
+                for mode in matches:
+                    if abs(mode["refresh"] - float(refresh)) < 0.001:
+                        chosen = mode
+                        break
+                else:
+                    fail(f"profile {profile['name']} uses an unknown mode {mode_value}")
+            for mode in output["modes"]:
+                mode["current"] = mode is chosen
+        position = settings.get("position")
+        if position:
+            x, y = position.split(",")
+            output["position"] = {"x": int(x), "y": int(y)}
+        if "scale" in settings:
+            output["scale"] = settings["scale"]
+        if "transform" in settings:
+            output["transform"] = settings["transform"]
+        if "adaptive_sync" in settings:
+            output["adaptive_sync"] = settings["adaptive_sync"]
+    with open(STATE, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2)
+
+
+command = sys.argv[1] if len(sys.argv) > 1 else ""
+log(command)
+
+if command == "status":
+    if os.environ.get("MOCK_KANSHI_STATUS_FAIL") == "1":
+        fail("kanshi is not running")
+    with open(CONFIG, encoding="utf-8") as handle:
+        profiles = parse_profiles(handle.read())
+    if profiles:
+        print(f"Current profile: {profiles[0]['name']}")
+    sys.exit(0)
+
+if command == "reload":
+    if os.environ.get("MOCK_KANSHI_RELOAD_FAIL") == "1":
+        fail("failed to parse config")
+    try:
+        with open(CONFIG, encoding="utf-8") as handle:
+            profiles = parse_profiles(handle.read())
+    except FileNotFoundError:
+        fail("no config file")
+    if not profiles:
+        fail("no profiles in config")
+    apply_profile(profiles[0])
+    sys.exit(0)
+
+fail(f"unsupported command {command}")

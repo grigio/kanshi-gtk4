@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""Minimal `wlr-randr` stand-in for the integration tests.
+
+The display state lives in the JSON file pointed to by $MOCK_WLR_STATE, in the
+same shape as `wlr-randr --json`. Supported invocations:
+
+    mock-wlr-randr --json
+    mock-wlr-randr --dryrun --output NAME ... [--output NAME ...]
+    mock-wlr-randr --output NAME ... [--output NAME ...]
+
+`--mode` selects an advertised mode; `--custom-mode` creates a synthetic mode
+(like wlr-randr) and makes it current.
+
+Failure injection (all optional):
+    MOCK_WLR_DRYRUN_FAIL=1   --dryrun exits 1
+    MOCK_WLR_CANCEL=1        apply exits 1 with "configuration cancelled"
+    MOCK_WLR_IGNORE_APPLY=1  apply exits 0 but changes nothing (verification
+                             mismatch)
+    MOCK_WLR_LOG=path        append one line per invocation
+"""
+
+import json
+import os
+import sys
+
+STATE = os.environ["MOCK_WLR_STATE"]
+LOG = os.environ.get("MOCK_WLR_LOG")
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def load():
+    with open(STATE, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def save(data):
+    tmp = STATE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2)
+    os.replace(tmp, STATE)
+
+
+def pick_mode(output, value):
+    size, _, refresh = value.partition("@")
+    width, height = size.split("x")
+    matches = [
+        mode
+        for mode in output["modes"]
+        if mode["width"] == int(width) and mode["height"] == int(height)
+    ]
+    if not matches:
+        fail(f"mode {value} is not advertised by {output['name']}")
+    chosen = matches[0]
+    if refresh:
+        for mode in matches:
+            if abs(mode["refresh"] - float(refresh)) < 0.001:
+                chosen = mode
+                break
+        else:
+            fail(f"mode {value} is not advertised by {output['name']}")
+    for mode in output["modes"]:
+        mode["current"] = mode is chosen
+
+
+def pick_custom_mode(output, value):
+    """Like `wlr-randr --custom-mode`: the panel need not advertise it."""
+    size, _, refresh = value.partition("@")
+    width, height = size.split("x")
+    rate = float(refresh) if refresh else 60.0
+    output["modes"] = [
+        mode for mode in output["modes"] if not mode.get("custom")
+    ]
+    for mode in output["modes"]:
+        mode["current"] = False
+    output["modes"].append(
+        {
+            "width": int(width),
+            "height": int(height),
+            "refresh": rate,
+            "preferred": False,
+            "current": True,
+            "custom": True,
+        }
+    )
+
+
+args = sys.argv[1:]
+if LOG:
+    with open(LOG, "a", encoding="utf-8") as handle:
+        handle.write(" ".join(args) + "\n")
+
+if args == ["--json"]:
+    json.dump(load(), sys.stdout)
+    sys.exit(0)
+
+dry_run = bool(args) and args[0] == "--dryrun"
+if dry_run:
+    args = args[1:]
+    if os.environ.get("MOCK_WLR_DRYRUN_FAIL") == "1":
+        fail("dry run rejected")
+
+data = load()
+by_name = {output["name"]: output for output in data}
+
+index = 0
+while index < len(args):
+    if args[index] != "--output":
+        fail(f"unexpected argument {args[index]}")
+    if index + 1 >= len(args):
+        fail("missing output name")
+    name = args[index + 1]
+    index += 2
+    output = by_name.get(name)
+    if output is None:
+        fail(f"unknown output {name}")
+
+    if index < len(args) and args[index] == "--off":
+        output["enabled"] = False
+        index += 1
+        continue
+    if index < len(args) and args[index] == "--on":
+        output["enabled"] = True
+        index += 1
+
+    while index < len(args) and args[index].startswith("--") and args[index] != "--output":
+        option = args[index]
+        if index + 1 >= len(args):
+            fail(f"missing value for {option}")
+        value = args[index + 1]
+        index += 2
+        if option == "--mode":
+            pick_mode(output, value)
+        elif option == "--custom-mode":
+            pick_custom_mode(output, value)
+        elif option == "--pos":
+            x, y = value.split(",")
+            output["position"] = {"x": int(x), "y": int(y)}
+        elif option == "--scale":
+            output["scale"] = float(value)
+        elif option == "--transform":
+            output["transform"] = value
+        elif option == "--adaptive-sync":
+            output["adaptive_sync"] = value == "enabled"
+        else:
+            fail(f"unsupported option {option}")
+
+if dry_run:
+    sys.exit(0)
+
+if os.environ.get("MOCK_WLR_CANCEL") == "1":
+    fail("configuration cancelled, please try again")
+if os.environ.get("MOCK_WLR_IGNORE_APPLY") == "1":
+    sys.exit(0)
+
+save(data)

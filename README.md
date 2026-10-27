@@ -1,0 +1,430 @@
+# kanshi-gtk4
+
+A small GTK4 / libadwaita app to arrange displays on Wayland and save the
+layout as a [kanshi](https://gitlab.freedesktop.org/emersion/kanshi) profile.
+
+Pick a preset, the app applies it, and a detached watchdog puts the old layout
+back after 10 seconds unless you click **Keep**. Keeping the layout writes it
+to `~/.config/kanshi/config`, so it survives reboot and hotplug.
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│  Displays                                    [↻]      [Apply] │
+├───────────────────────────────────────────────────────────────┤
+│  Layout                                                       │
+│  ╭─────────╮ ╭─────────╮ ╭─────────╮ ╭─────────╮              │
+│  │  ▄▄▄    │ │ ▄▄▄ ▄▄▄ │ │  ▄▄▄▄   │ │   ▄▄▄   │              │
+│  │ Laptop  │ │ Extend  │ │ Mirror  │ │External │              │
+│  ╰─────────╯ ╰─────────╯ ╰─────────╯ ╰─────────╯              │
+│                                                               │
+│  Preview                                                      │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │  ┌────────────────────┐   ┌──────────────┐              │  │
+│  │  │ eDP-1              │   │ DP-1         │              │  │
+│  │  │ 1560 × 1040        │   │ 1280 × 800   │              │  │
+│  │  │ scale 2            │   │ scale 1.5    │              │  │
+│  │  └────────────────────┘   └──────────────┘              │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│                                                               │
+│  ● kanshi running · current profile: auto-extend              │
+└───────────────────────────────────────────────────────────────┘
+```
+
+## Features
+
+- Four one-click layouts: **Laptop only**, **Extend**, **Mirror**,
+  **External only**.
+- Per-output resolution, refresh rate, scale, rotation, adaptive sync and
+  enabled/disabled controls.
+- Lower custom resolutions for panels that advertise only their native size.
+- A live, to-scale preview; drag the external display to arrange it freely.
+- A 10-second countdown with **Keep** / **Revert**, plus a detached watchdog
+  that restores the previous layout even if the app crashes or is killed.
+- A marked kanshi block that survives hand-written profiles and is applied at
+  login and on hotplug.
+- Read-only startup: nothing is changed or written until you press Apply.
+
+## Requirements
+
+- **labwc** — the supported compositor. It implements
+  `zwlr_output_manager_v1`, the protocol this app drives. Other wlroots-based
+  compositors that expose the same protocol may work but are untested.
+  **GNOME, KDE and Hyprland are not supported** (they do not expose the
+  protocol).
+- [`wlr-randr`](https://gitlab.freedesktop.org/emersion/wlr-randr) — required.
+- [kanshi](https://gitlab.freedesktop.org/emersion/kanshi) — optional, needed
+  to persist the layout across reboot and hotplug.
+
+```sh
+sudo pacman -S wlr-randr kanshi
+```
+
+### Compositor support
+
+| Compositor | `zwlr_output_manager_v1` | Status |
+|---|---|---|
+| labwc | yes, v4 verified | supported |
+| river | yes, v4 (0.3.13+) | untested, should work |
+| wayfire | yes, v4 (0.9+) | untested, should work |
+| niri | yes, v4 (26.04+) | untested, should work |
+| Cage / COSMIC / phoc | yes, v4 | untested, should work |
+| Hyprland | no (`hyprctl` instead) | not supported |
+| GNOME / KDE | no | not supported |
+| X11 / XWayland session | n/a | not supported |
+
+Tested on labwc 0.20.2 (wlroots 0.20.2) with a Xiaomi Book Pro 14
+(eDP-1, 3120×2080) and a Dell E248WFP on HDMI-A-1. Connector names, modes,
+refresh rates and scales are read from `wlr-randr` at runtime: nothing about a
+particular display is hardcoded, and each output has its own resolution and
+refresh picker.
+
+## Build and run
+
+```sh
+cargo build --release
+./target/release/kanshi-gtk4
+```
+
+### Arch Linux package
+
+The repository ships a `PKGBUILD` for a local package (it is not published to
+the AUR):
+
+```sh
+makepkg -si
+# or, after building:
+sudo pacman -U kanshi-gtk4-*.pkg.tar.zst
+```
+
+CI builds the same package for every `v*` tag and attaches it to the GitHub
+release. The package installs the binary, desktop entry, icon and license.
+
+## Usage
+
+### Presets
+
+| Preset | Internal | External |
+|---|---|---|
+| Laptop only | on, `0,0` | off |
+| Extend | on, `0,0` | on, `x = internal_logical_w`, `y = 0` (draggable) |
+| Mirror | on, `0,0` | on, `0,0` |
+| External only | off | on, `0,0` |
+
+With a single display, only the preset that makes sense is enabled: a lone
+built-in panel enables **Laptop only**, a lone external monitor enables
+**External only**, and the other cards are insensitive with a tooltip. On a
+desktop or tablet every output counts as external, so two external monitors
+can still Extend and Mirror.
+
+### Per-output controls
+
+Expand a display row to change resolution, refresh rate, scale, rotation,
+adaptive sync, or turn the output off. Disabling an output keeps its settings
+in the plan and greys out the controls. The internal panel is detected by
+connector name (`eDP-*`, `LVDS-*`, `DSI-*`) or from the saved state.
+
+When a panel advertises only one size, the resolution list also offers lower
+aspect-preserving sizes marked `(custom)`. They are applied with the
+compositor's custom-mode request and saved to kanshi as
+`mode --custom WIDTHxHEIGHT@RATE`.
+
+Drag the external rectangle in the preview to place it anywhere; this switches
+the layout to **Custom** and keeps the live positions. The laptop panel stays
+at `0,0`.
+
+### Apply, keep, revert
+
+Press **Apply** to build and validate the plan, snapshot the current state,
+spawn the watchdog and apply the layout. A modal countdown appears:
+
+- **Enter** or **Keep** saves the layout.
+- **Esc**, **Revert**, closing the window, or waiting 10 seconds restores the
+  previous arrangement.
+- If the app crashes or is killed, the detached watchdog restores it anyway.
+
+**Apply** is disabled when the plan already matches the current outputs or
+when validation fails. Startup is read-only: nothing is changed or written
+until Apply.
+
+### Command line
+
+```
+kanshi-gtk4                     # open the GUI
+kanshi-gtk4 --print-config      # print the generated kanshi config and exit
+kanshi-gtk4 --verbose           # diagnostics on stderr
+kanshi-gtk4 --config PATH       # override the kanshi config path
+kanshi-gtk4 --state-dir PATH    # override the app state directory
+kanshi-gtk4 --revert DIR        # restore a pending transaction manually
+kanshi-gtk4 --version
+```
+
+`--print-config` writes nothing and is useful for checking what the app would
+generate for the current output set.
+
+## How it works
+
+### Layout model
+
+All positions are in the compositor's global **logical** coordinate space.
+Logical size is the mode size divided by the scale, with 90°/270° rotation
+swapping width and height. For example, 3120×2080 at scale 2 is 1560×1040;
+1920×1200 at scale 1.5 is 1280×800.
+
+Presets anchor the built-in panel at `0,0` and place the external display to
+its right for Extend. A manual drag switches the plan to **Custom** and keeps
+the live positions. Changing mode, scale or rotation in a preset recomputes
+the positions; disabling an output keeps its settings.
+
+**Mirroring** places both outputs at `0,0`. Wayland has no clone-and-scale
+operation, so each output renders its own viewport of the same scene; if the
+logical sizes differ, one display shows a crop. The app chooses an external
+scale that fits the external logical area inside the internal one:
+
+```
+scale_ext = max(ext_mode_w / internal_logical_w, ext_mode_h / internal_logical_h)
+```
+
+clamped to 0.5–3.0 and rounded to three decimals. For 1920×1200 against
+1560×1040 this gives 1.231 and a 1560×975 external area; the UI shows a note
+when the result is not exact.
+
+**Validation** rejects zero enabled outputs, unknown modes, scales outside
+0.5–3.0 and invalid logical sizes. Overlapping outputs outside Mirror are
+warnings. Generated profiles always keep at least one output enabled, so a
+config produced by this app cannot make the desktop completely invisible.
+
+### Apply engines
+
+The app has two apply engines, selected at transaction start:
+
+| Engine | When | Apply | Revert |
+|---|---|---|---|
+| kanshi | `kanshictl status` succeeds, the daemon uses the managed config path, and the file is writable | write provisional config, apply with `wlr-randr`, `kanshictl reload` | restore the previous config bytes and reload |
+| wlr-randr | kanshi is missing or stopped, uses a custom `-c` path, or the config is not writable | `wlr-randr --dryrun`, then apply | restore the output snapshot |
+
+The app applies the layout itself and then hands the same profile to kanshi.
+This is required because kanshi 1.9 on labwc ignores the enabled bit for a
+head that is currently off, so Extend would leave the laptop panel dark. The
+preview is still exactly what kanshi applies at login. If kanshi is not
+running, the layout still applies; it just will not re-apply at login.
+
+### Transactions and the watchdog
+
+Every Apply creates `$XDG_RUNTIME_DIR/kanshi-gtk4/pending-<uuid>/` (mode 0700)
+containing:
+
+- `state.json` — engine, output snapshot, paths, app/watchdog PIDs;
+- `config.before` / `state.before` — exact previous bytes;
+- `candidate.config` / `state.after` — what will be saved on Keep;
+- `marker` — `keep` or `cancel`, written by the UI;
+- `watchdog.log`.
+
+The watchdog is spawned before the first change and polls the marker every
+100 ms for 10 seconds. No marker means the app crashed or was killed, so it
+restores the previous config and output snapshot, logs the result and sends a
+`notify-send` notification if available. The restore is idempotent, so it can
+race with the UI's own revert safely.
+
+On Keep, app state is written first, then the config (for the wlr-randr
+engine), then the `keep` marker last. If saving fails before the marker, the
+old state, config and layout are restored.
+
+A new Apply first rolls back any older pending transaction. If the app and
+watchdog are both gone and no marker exists, the next launch offers
+**Restore layout** or **Discard**; `--revert DIR` does the same from the
+command line.
+
+### kanshi integration
+
+The app owns only a marked block at the top of `~/.config/kanshi/config`:
+
+```kanshi
+# >>> kanshi-gtk4 managed block — regenerated on apply, do not edit
+# eDP-1: EDO EDO14.55, 3120x2080 @ 120 Hz, logical 1560x1040
+
+# Default when eDP-1 + DP-1 are connected
+profile auto-extend {
+	output eDP-1 {
+		mode 3120x2080@120
+		position 0,0
+		scale 2
+		transform normal
+	}
+	output DP-1 {
+		mode 1920x1200@60
+		position 1560,0
+		scale 1.5
+		transform normal
+	}
+}
+
+# Default when only eDP-1 is connected
+profile auto-single {
+	output eDP-1 {
+		mode 3120x2080@120
+		position 0,0
+		scale 2
+		transform normal
+	}
+}
+# <<< kanshi-gtk4 managed block
+```
+
+Everything outside the markers is preserved. If there are no markers yet, the
+block is inserted at the top and the old content is kept below
+`# --- preserved from previous config ---`.
+
+kanshi uses first-match-wins: a profile matches only when every connected head
+is listed and every listed output matches a head. The generated block is
+therefore first in the file, and within each output set the chosen layout is
+first. Every connected output appears in every profile, either configured or
+`output NAME disable`.
+
+Profiles are named `auto-<layout>` (`auto-single`, `auto-extend`,
+`auto-mirror`, `auto-external-only`, `auto-custom`); a sanitised set suffix is
+added on collisions, e.g. `auto-extend--edp-1+dp-1`. The `auto-` prefix avoids
+clashing with hand-written profiles such as `single`.
+
+Layouts for previously seen output sets are kept in app state, so docking at
+the office (eDP + DP) and at home (eDP + HDMI) yields profiles for both. On
+first run a single-internal profile is seeded from the live panel, so
+undocking works out of the box. The block is regenerated for all known sets,
+current set first.
+
+**File safety.** Writes are atomic (same-directory temp file, fsync, rename)
+and follow symlinks to the real target. Before writing, the previous config is
+saved as `config.pre-kanshi-gtk4.<timestamp>.bak`; after each successful Keep
+the app updates `config.kanshi-gtk4.bak`. It never touches user files such as
+`config.bak`. If the config is not writable, the app falls back to the
+wlr-randr engine and says so.
+
+### State file
+
+`~/.config/kanshi-gtk4/state.json` stores the detected internal outputs and
+the layouts remembered for each output set:
+
+```json
+{
+  "version": 1,
+  "internal_outputs": ["eDP-1"],
+  "sets": {
+    "eDP-1+DP-1": {
+      "last_seen": "2026-10-26T16:40:00+01:00",
+      "default_layout": "extend",
+      "outputs": {
+        "eDP-1": {
+          "mode": "3120x2080@120",
+          "custom": false,
+          "scale": 2.0,
+          "desktop_scale": 2.0,
+          "transform": "normal",
+          "position": [0, 0],
+          "adaptive_sync": false
+        },
+        "DP-1": {
+          "mode": "1920x1200@60",
+          "custom": false,
+          "scale": 1.5,
+          "desktop_scale": 1.5,
+          "transform": "normal",
+          "position": [1560, 0],
+          "adaptive_sync": false
+        }
+      }
+    }
+  }
+}
+```
+
+State is the source of truth for generation. Losing it loses remembered sets
+but never breaks the display: the hand-written config is still there, and a
+fresh state is seeded from the current panel.
+
+## Limitations and edge cases
+
+- Mirroring is approximate when the two panels have different logical sizes;
+  the UI shows the visible area. There is no clone-and-scale operation in
+  Wayland.
+- Presets handle the internal panel plus one external display. Extra outputs
+  are listed and editable, but not auto-positioned.
+- Only the external display can be dragged; the laptop panel stays at `0,0`.
+- If the applied layout turns off the display showing the countdown, the
+  dialog may not be visible. The watchdog still reverts after 10 seconds.
+- Unplugging a display during the countdown aborts the transaction and
+  restores the previous layout for the outputs that are still present.
+- Output names are connector names. If a monitor appears under a different
+  name after a reboot or through a dock, the profile may not match; EDID
+  aliases are future work.
+- `wlr-randr` is a runtime dependency; a native protocol backend is future
+  work.
+- GNOME, KDE and Hyprland are not supported.
+
+## Troubleshooting
+
+- **No displays detected** — `wlr-randr --json` failed. Check that the
+  compositor exposes `zwlr_output_manager_v1`:
+  `wayland-info | grep zwlr_output_manager`. Make sure `wlr-randr` is
+  installed.
+- **This compositor does not support output management** — GNOME, KDE and
+  Hyprland do not expose the protocol. Use labwc or another wlroots-based
+  compositor.
+- **kanshi not running** — the layout still applies but will not re-apply at
+  login. Start kanshi or add it to autostart.
+- **Config not writable** — the app falls back to the wlr-randr engine and
+  shows a warning. Fix permissions or point `--config` at a writable file.
+- **Stale transaction** — on launch, choose **Restore layout**, or run
+  `kanshi-gtk4 --revert "$XDG_RUNTIME_DIR"/kanshi-gtk4/pending-<id>`.
+- **Backups** — `config.pre-kanshi-gtk4.<timestamp>.bak` and
+  `config.kanshi-gtk4.bak`.
+- **Diagnostics** — run with `--verbose`; the watchdog writes `watchdog.log`
+  inside the transaction directory.
+
+## Development
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+The unit tests cover geometry, validation, config generation, managed-block
+merging and the watchdog. The integration tests in `tests/integration.rs` run
+the real apply/keep/revert state machine against `tests/mock-wlr-randr` and
+`tests/mock-kanshictl`, with no compositor needed. They exercise the kanshi
+and wlr-randr engines, reload failure, dry-run failure, hotplug cancellation,
+verification mismatch and watchdog timeout.
+
+Environment overrides used by the tests (and useful for debugging):
+
+| Variable | Meaning |
+|---|---|
+| `KANSHI_GTK4_WLR_RANDR` | path to `wlr-randr` |
+| `KANSHI_GTK4_KANSHICTL` | path to `kanshictl` |
+| `KANSHI_GTK4_WAYLAND_INFO` | path to `wayland-info` |
+| `KANSHI_GTK4_KANSHI_CONFIG` | kanshi config path |
+| `KANSHI_GTK4_STATE_DIR` | app state directory |
+| `KANSHI_GTK4_TIMEOUT` | watchdog timeout override |
+| `KANSHI_GTK4_NOTIFY_SEND` | path to `notify-send` |
+
+A nested headless compositor is useful for UI work:
+
+```sh
+WLR_BACKENDS=headless WLR_RENDERER=pixman labwc
+```
+
+It provides one virtual output; real multi-output testing needs two monitors
+or a second virtual output.
+
+## References
+
+- [kanshi](https://gitlab.freedesktop.org/emersion/kanshi) — `man kanshi`,
+  `man 5 kanshi`, `man kanshictl`
+- [wlr-randr](https://gitlab.freedesktop.org/emersion/wlr-randr)
+- [`wlr-output-management-unstable-v1` protocol](https://gitlab.freedesktop.org/wlroots/wlr-protocols)
+- [Compositor support matrix](https://wayland.app/protocols/wlr-output-management-unstable-v1)
+- [gtk4-rs](https://gtk-rs.org/gtk4-rs)
+- [libadwaita-rs](https://gtk-rs.org/gtk4-rs/stable/latest/docs/libadwaita)
+
+## License
+
+GPL-3.0-only. See [LICENSE](LICENSE).

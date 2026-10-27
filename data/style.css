@@ -1,0 +1,57 @@
+.preset-card {
+  padding: 8px 6px;
+  border-radius: 12px;
+  border: 1px solid alpha(@window_fg_color, 0.10);
+  background: alpha(@window_fg_color, 0.02);
+}
+
+.preset-card:checked {
+  background: alpha(@accent_bg_color, 0.18);
+  border-color: alpha(@accent_bg_color, 0.65);
+}
+
+.preset-diagram {
+  border-radius: 8px;
+  background: alpha(@window_fg_color, 0.04);
+}
+
+.preview-canvas {
+  border-radius: 10px;
+  background: alpha(@window_fg_color, 0.03);
+}
+
+.status-bar {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: alpha(@window_fg_color, 0.04);
+}
+
+.status-dot {
+  font-size: 9px;
+}
+
+.status-ok {
+  color: #2ec27e;
+}
+
+.status-warn {
+  color: #e5a50a;
+}
+
+.status-error {
+  color: #e01b24;
+}
+
+.validation-error {
+  color: #e01b24;
+}
+
+.validation-warning {
+  color: #e5a50a;
+}
+
+.countdown-number {
+  font-size: 64px;
+  font-weight: 800;
+  margin: 4px 0;
+}

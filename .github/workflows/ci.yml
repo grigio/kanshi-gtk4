@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check version sync (Cargo.toml is the source of truth)
+        run: |
+          CARGO=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          PKG=$(sed -n 's/^pkgver=//p' PKGBUILD | head -n1)
+          LOCK=$(awk '/^name = "kanshi-gtk4"$/{getline; print}' Cargo.lock \
+            | sed -n 's/^version = "\(.*\)"/\1/p')
+          [ -n "$CARGO" ] || { echo "Cargo.toml version not found"; exit 1; }
+          [ "$CARGO" = "$PKG" ] || { echo "PKGBUILD $PKG != Cargo.toml $CARGO"; exit 1; }
+          [ "$CARGO" = "$LOCK" ] || { echo "Cargo.lock $LOCK != Cargo.toml $CARGO"; exit 1; }
+          echo "versions in sync: $CARGO"
+
+      - name: Check tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          CARGO=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          [ "${{ github.ref_name }}" = "v$CARGO" ] \
+            || { echo "tag ${{ github.ref_name }} != v$CARGO"; exit 1; }
+
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      # The Arch image has no git: install it before checkout.
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git rust pkgconf gtk4 libadwaita wlr-randr desktop-file-utils python
+
+      - uses: actions/checkout@v5
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Upload binary
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: kanshi-gtk4-linux-x86_64
+          path: target/release/kanshi-gtk4
+
+  package:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build]
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git rust pkgconf gtk4 libadwaita wlr-randr desktop-file-utils python
+
+      - uses: actions/checkout@v5
+
+      # makepkg refuses to run as root. Build as an unprivileged user; the
+      # PKGBUILD builds from $startdir, so the Rust sources are not touched.
+      - name: Build Arch Linux package
+        run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          su builder -c "cd '$GITHUB_WORKSPACE' && makepkg --noconfirm --force"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: archlinux-package
+          path: '*.pkg.tar.zst'
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # Full history + tags: the release body lists the commits since the
+      # previous v* tag.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Build release notes (titles since the previous tag)
+        run: |
+          TAG="${{ github.ref_name }}"
+          PREV=$(git tag --list 'v*' --sort=-v:refname | grep -Fxv "$TAG" | head -n1 || true)
+          if [ -n "$PREV" ]; then
+            RANGE="$PREV..$TAG"
+            HEADER="Changes since $PREV:"
+          else
+            RANGE="$TAG"
+            HEADER="Changes in $TAG:"
+          fi
+          {
+            echo "$HEADER"
+            COMMITS=$(git log --format='- %s' "$RANGE" || true)
+            [ -n "$COMMITS" ] || COMMITS=$(git show -s --format='- %s' "$TAG")
+            echo "$COMMITS"
+          } > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          files: |
+            artifacts/kanshi-gtk4-linux-x86_64/kanshi-gtk4
+            artifacts/archlinux-package/*.pkg.tar.zst

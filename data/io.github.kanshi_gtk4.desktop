@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Displays
+Comment=Arrange displays and save the layout to kanshi
+Exec=kanshi-gtk4
+Icon=io.github.kanshi_gtk4
+Terminal=false
+Type=Application
+Categories=Settings;HardwareSettings;
+Keywords=display;monitor;screen;layout;kanshi;wayland;
+StartupNotify=true

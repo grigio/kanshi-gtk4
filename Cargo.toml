@@ -1,0 +1,23 @@
+[package]
+name = "kanshi-gtk4"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.92"
+description = "Arrange displays and persist the layout as a kanshi profile"
+license = "GPL-3.0-only"
+repository = "https://github.com/grigio/kanshi-gtk4"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+gtk4 = { version = "0.11", features = ["v4_24"] }
+libadwaita = { version = "0.9", features = ["gtk_v4_24", "v1_10"] }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+wait-timeout = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

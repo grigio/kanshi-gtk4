@@ -1,0 +1,72 @@
+[
+  {
+    "name": "DP-1",
+    "description": "Dell Inc. DELL U2720Q (DP-1)",
+    "make": "Dell Inc.",
+    "model": "DELL U2720Q",
+    "serial": "AAA111",
+    "physical_size": {
+      "width": 600,
+      "height": 340
+    },
+    "enabled": true,
+    "modes": [
+      {
+        "width": 2560,
+        "height": 1440,
+        "refresh": 164.999001,
+        "preferred": true,
+        "current": true
+      },
+      {
+        "width": 2560,
+        "height": 1440,
+        "refresh": 60.000000,
+        "preferred": false,
+        "current": false
+      }
+    ],
+    "position": {
+      "x": 0,
+      "y": 0
+    },
+    "transform": "normal",
+    "scale": 1.250000,
+    "adaptive_sync": false
+  },
+  {
+    "name": "DP-2",
+    "description": "Samsung Electric Company S27R75 (DP-2)",
+    "make": "Samsung Electric Company",
+    "model": "S27R75",
+    "serial": "BBB222",
+    "physical_size": {
+      "width": 600,
+      "height": 340
+    },
+    "enabled": true,
+    "modes": [
+      {
+        "width": 3840,
+        "height": 2160,
+        "refresh": 60.000000,
+        "preferred": true,
+        "current": true
+      },
+      {
+        "width": 2560,
+        "height": 1440,
+        "refresh": 60.000000,
+        "preferred": false,
+        "current": false
+      }
+    ],
+    "position": {
+      "x": 0,
+      "y": 0
+    },
+    "transform": "normal",
+    "scale": 1.500000,
+    "adaptive_sync": false
+  }
+]

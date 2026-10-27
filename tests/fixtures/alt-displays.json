@@ -1,0 +1,86 @@
+[
+  {
+    "name": "eDP-2",
+    "description": "BOE 0x095F (eDP-2)",
+    "make": "BOE",
+    "model": "0x095F",
+    "serial": null,
+    "physical_size": {
+      "width": 300,
+      "height": 190
+    },
+    "enabled": true,
+    "modes": [
+      {
+        "width": 2880,
+        "height": 1800,
+        "refresh": 90.000000,
+        "preferred": true,
+        "current": true
+      },
+      {
+        "width": 2880,
+        "height": 1800,
+        "refresh": 60.000000,
+        "preferred": false,
+        "current": false
+      },
+      {
+        "width": 1920,
+        "height": 1080,
+        "refresh": 60.000000,
+        "preferred": false,
+        "current": false
+      }
+    ],
+    "position": {
+      "x": 0,
+      "y": 0
+    },
+    "transform": "normal",
+    "scale": 1.750000,
+    "adaptive_sync": false
+  },
+  {
+    "name": "DP-2",
+    "description": "LG Electronics LG ULTRAGEAR (DP-2)",
+    "make": "LG Electronics",
+    "model": "LG ULTRAGEAR",
+    "serial": "12345",
+    "physical_size": {
+      "width": 600,
+      "height": 340
+    },
+    "enabled": true,
+    "modes": [
+      {
+        "width": 3840,
+        "height": 2160,
+        "refresh": 143.998001,
+        "preferred": true,
+        "current": true
+      },
+      {
+        "width": 3840,
+        "height": 2160,
+        "refresh": 60.000000,
+        "preferred": false,
+        "current": false
+      },
+      {
+        "width": 2560,
+        "height": 1440,
+        "refresh": 120.000000,
+        "preferred": false,
+        "current": false
+      }
+    ],
+    "position": {
+      "x": 0,
+      "y": 0
+    },
+    "transform": "normal",
+    "scale": 1.500000,
+    "adaptive_sync": true
+  }
+]
