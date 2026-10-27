@@ -11,8 +11,8 @@ repository = "https://github.com/grigio/kanshi-gtk4"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
-gtk4 = { version = "0.11", features = ["v4_24"] }
-libadwaita = { version = "0.9", features = ["gtk_v4_24", "v1_10"] }
+gtk4 = { version = "0.11", features = ["v4_18"] }
+libadwaita = { version = "0.9", features = ["gtk_v4_18", "v1_7"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

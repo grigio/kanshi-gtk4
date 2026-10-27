@@ -25,7 +25,9 @@ writes it to `~/.config/kanshi/config`, so it survives reboot and hotplug.
 
 ## Requirements
 
-- **labwc** or **niri** — supported compositors. Both implement
+- **GTK 4.18+ / libadwaita 1.7+** — the oldest GUI stack the source builds
+  against, which also makes the app installable on Debian 13 (trixie).
+- **labwc, niri or sway (1.11+)** — supported compositors. All implement
   `zwlr_output_manager_v1`, the protocol this app drives. Other compositors
   exposing the same protocol may work but are untested.
   **GNOME, KDE and Hyprland are not supported** (they do not expose the
@@ -44,12 +46,19 @@ sudo pacman -S wlr-randr kanshi
 |---|---|---|
 | labwc | yes, v4 verified | supported |
 | niri | yes, v4 verified (26.04+) | supported |
+| sway | yes, v4 (1.11+) | supported |
 | river | yes, v4 (0.3.13+) | untested, should work |
 | wayfire | yes, v4 (0.9+) | untested, should work |
 | Cage / COSMIC / phoc | yes, v4 | untested, should work |
 | Hyprland | no (`hyprctl` instead) | not supported |
 | GNOME / KDE | no | not supported |
 | X11 / XWayland session | n/a | not supported |
+
+> **sway users:** sway only gained `zwlr_output_manager_v1` (v4) in **1.11**, so
+> the app sees no outputs on older sway. Debian 13 (trixie) ships sway 1.10.1,
+> so on stock trixie + sway the app finds nothing to arrange. Check with
+> `wlr-randr` (empty output means the protocol is missing) and use sway 1.11+
+> or a different compositor.
 
 Tested on labwc 0.20.2 and niri with a Xiaomi Book Pro 14 (eDP-1, 3120×2080)
 and a Dell E248WFP (1920×1200). Connector names, modes, refresh rates and
@@ -76,6 +85,30 @@ sudo pacman -U kanshi-gtk4-*.pkg.tar.zst
 
 CI builds the same package for every `v*` tag and attaches it to the GitHub
 release. The package installs the binary, desktop entry, icon and license.
+
+### Debian / Ubuntu package
+
+A `.deb` is built for every `v*` tag inside a Debian 13 container and attached
+to the GitHub release, so it is linked against GTK 4.18 and libadwaita 1.7 and
+also runs on newer releases:
+
+```sh
+sudo apt install ./kanshi-gtk4_*.deb
+```
+
+To build it yourself (needs `cargo` and `dpkg-deb`):
+
+```sh
+./packaging/build-deb.sh
+sudo apt install ./dist/kanshi-gtk4_*.deb
+```
+
+The script skips debhelper and dh-cargo, because Debian 13's `rustc` is older
+than the `rust-version` in `Cargo.toml`; it compiles with the cargo on `PATH`
+and assembles the package tree by hand.
+
+The `.deb` does not change compositor support: on trixie the GUI stack is old
+enough, but sway 1.10.1 is not (see the sway note above).
 
 ## Usage
 
