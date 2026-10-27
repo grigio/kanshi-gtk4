@@ -93,9 +93,9 @@ fn activate(
             application,
             "Output management is not available",
             &format!(
-                "{reason}\n\nThis app targets labwc and needs a compositor that implements \
-                 zwlr_output_manager_v1. Other wlroots-based compositors may work, but only \
-                 labwc is supported. GNOME, KDE and Hyprland are not supported."
+                "{reason}\n\nThis app supports labwc and niri and needs a compositor that \
+                 implements zwlr_output_manager_v1. Other compositors may work, but are \
+                 untested. GNOME, KDE and Hyprland are not supported."
             ),
         );
         window.present();

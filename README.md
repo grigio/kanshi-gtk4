@@ -1,54 +1,35 @@
 # kanshi-gtk4
 
-A small GTK4 / libadwaita app to arrange displays on Wayland and save the
-layout as a [kanshi](https://gitlab.freedesktop.org/emersion/kanshi) profile.
+<img src="kanshi-gtk4.png" alt="kanshi-gtk4 showing four layout presets and a live display preview" width="420">
 
-Pick a preset, the app applies it, and a detached watchdog puts the old layout
-back after 10 seconds unless you click **Keep**. Keeping the layout writes it
-to `~/.config/kanshi/config`, so it survives reboot and hotplug.
+*Running on niri: a 3120×2080 laptop panel and a 1920×1200 external monitor.*
 
-```
-┌───────────────────────────────────────────────────────────────┐
-│  Displays                                    [↻]      [Apply] │
-├───────────────────────────────────────────────────────────────┤
-│  Layout                                                       │
-│  ╭─────────╮ ╭─────────╮ ╭─────────╮ ╭─────────╮              │
-│  │  ▄▄▄    │ │ ▄▄▄ ▄▄▄ │ │  ▄▄▄▄   │ │   ▄▄▄   │              │
-│  │ Laptop  │ │ Extend  │ │ Mirror  │ │External │              │
-│  ╰─────────╯ ╰─────────╯ ╰─────────╯ ╰─────────╯              │
-│                                                               │
-│  Preview                                                      │
-│  ┌─────────────────────────────────────────────────────────┐  │
-│  │  ┌────────────────────┐   ┌──────────────┐              │  │
-│  │  │ eDP-1              │   │ DP-1         │              │  │
-│  │  │ 1560 × 1040        │   │ 1280 × 800   │              │  │
-│  │  │ scale 2            │   │ scale 1.5    │              │  │
-│  │  └────────────────────┘   └──────────────┘              │  │
-│  └─────────────────────────────────────────────────────────┘  │
-│                                                               │
-│  ● kanshi running · current profile: auto-extend              │
-└───────────────────────────────────────────────────────────────┘
-```
+Arrange displays on Wayland and save the layout as a
+[kanshi](https://gitlab.freedesktop.org/emersion/kanshi) profile — a small
+GTK4 / libadwaita app.
+
+Pick a preset, the layout applies immediately, and a detached watchdog puts the
+old one back after 10 seconds unless you click **Keep**. Keeping the layout
+writes it to `~/.config/kanshi/config`, so it survives reboot and hotplug.
 
 ## Features
 
-- Four one-click layouts: **Laptop only**, **Extend**, **Mirror**,
-  **External only**.
+- Four one-click layouts: **Laptop only**, **Extend**, **Mirror**, **External only**.
 - Per-output resolution, refresh rate, scale, rotation, adaptive sync and
   enabled/disabled controls.
 - Lower custom resolutions for panels that advertise only their native size.
-- A live, to-scale preview; drag the external display to arrange it freely.
-- A 10-second countdown with **Keep** / **Revert**, plus a detached watchdog
-  that restores the previous layout even if the app crashes or is killed.
+- Live, to-scale preview; drag the external display to arrange it freely.
+- 10-second countdown with **Keep** / **Revert**, plus a detached watchdog that
+  restores the previous layout even if the app crashes or is killed.
 - A marked kanshi block that survives hand-written profiles and is applied at
   login and on hotplug.
 - Read-only startup: nothing is changed or written until you press Apply.
 
 ## Requirements
 
-- **labwc** — the supported compositor. It implements
-  `zwlr_output_manager_v1`, the protocol this app drives. Other wlroots-based
-  compositors that expose the same protocol may work but are untested.
+- **labwc** or **niri** — supported compositors. Both implement
+  `zwlr_output_manager_v1`, the protocol this app drives. Other compositors
+  exposing the same protocol may work but are untested.
   **GNOME, KDE and Hyprland are not supported** (they do not expose the
   protocol).
 - [`wlr-randr`](https://gitlab.freedesktop.org/emersion/wlr-randr) — required.
@@ -64,19 +45,18 @@ sudo pacman -S wlr-randr kanshi
 | Compositor | `zwlr_output_manager_v1` | Status |
 |---|---|---|
 | labwc | yes, v4 verified | supported |
+| niri | yes, v4 verified (26.04+) | supported |
 | river | yes, v4 (0.3.13+) | untested, should work |
 | wayfire | yes, v4 (0.9+) | untested, should work |
-| niri | yes, v4 (26.04+) | untested, should work |
 | Cage / COSMIC / phoc | yes, v4 | untested, should work |
 | Hyprland | no (`hyprctl` instead) | not supported |
 | GNOME / KDE | no | not supported |
 | X11 / XWayland session | n/a | not supported |
 
-Tested on labwc 0.20.2 (wlroots 0.20.2) with a Xiaomi Book Pro 14
-(eDP-1, 3120×2080) and a Dell E248WFP on HDMI-A-1. Connector names, modes,
-refresh rates and scales are read from `wlr-randr` at runtime: nothing about a
-particular display is hardcoded, and each output has its own resolution and
-refresh picker.
+Tested on labwc 0.20.2 and niri with a Xiaomi Book Pro 14 (eDP-1, 3120×2080)
+and a Dell E248WFP (1920×1200). Connector names, modes, refresh rates and
+scales are read from `wlr-randr` at runtime: nothing about a particular display
+is hardcoded, and each output has its own resolution and refresh picker.
 
 ## Build and run
 
@@ -143,8 +123,7 @@ spawn the watchdog and apply the layout. A modal countdown appears:
 - If the app crashes or is killed, the detached watchdog restores it anyway.
 
 **Apply** is disabled when the plan already matches the current outputs or
-when validation fails. Startup is read-only: nothing is changed or written
-until Apply.
+when validation fails.
 
 ### Command line
 
@@ -158,8 +137,7 @@ kanshi-gtk4 --revert DIR        # restore a pending transaction manually
 kanshi-gtk4 --version
 ```
 
-`--print-config` writes nothing and is useful for checking what the app would
-generate for the current output set.
+`--print-config` writes nothing; use it to preview the generated config.
 
 ## How it works
 
@@ -236,7 +214,10 @@ command line.
 
 ### kanshi integration
 
-The app owns only a marked block at the top of `~/.config/kanshi/config`:
+The app owns only a marked block at the top of `~/.config/kanshi/config`.
+
+<details>
+<summary>Example managed block</summary>
 
 ```kanshi
 # >>> kanshi-gtk4 managed block — regenerated on apply, do not edit
@@ -270,6 +251,8 @@ profile auto-single {
 # <<< kanshi-gtk4 managed block
 ```
 
+</details>
+
 Everything outside the markers is preserved. If there are no markers yet, the
 block is inserted at the top and the old content is kept below
 `# --- preserved from previous config ---`.
@@ -301,7 +284,13 @@ wlr-randr engine and says so.
 ### State file
 
 `~/.config/kanshi-gtk4/state.json` stores the detected internal outputs and
-the layouts remembered for each output set:
+the layouts remembered for each output set. State is the source of truth for
+generation: losing it loses remembered sets but never breaks the display — the
+hand-written config is still there, and a fresh state is seeded from the
+current panel.
+
+<details>
+<summary>Example state</summary>
 
 ```json
 {
@@ -336,11 +325,9 @@ the layouts remembered for each output set:
 }
 ```
 
-State is the source of truth for generation. Losing it loses remembered sets
-but never breaks the display: the hand-written config is still there, and a
-fresh state is seeded from the current panel.
+</details>
 
-## Limitations and edge cases
+## Limitations
 
 - Mirroring is approximate when the two panels have different logical sizes;
   the UI shows the visible area. There is no clone-and-scale operation in
@@ -366,8 +353,8 @@ fresh state is seeded from the current panel.
   `wayland-info | grep zwlr_output_manager`. Make sure `wlr-randr` is
   installed.
 - **This compositor does not support output management** — GNOME, KDE and
-  Hyprland do not expose the protocol. Use labwc or another wlroots-based
-  compositor.
+  Hyprland do not expose the protocol. Use labwc, niri or another compositor
+  that does.
 - **kanshi not running** — the layout still applies but will not re-apply at
   login. Start kanshi or add it to autostart.
 - **Config not writable** — the app falls back to the wlr-randr engine and

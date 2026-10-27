@@ -190,8 +190,8 @@ impl OutputBackend for WlrRandrBackend {
             && std::env::var_os("WAYLAND_SOCKET").is_none()
         {
             return Ok(BackendInfo::unsupported(
-                "No Wayland session detected. This app targets labwc, which supports \
-                 zwlr_output_manager_v1.",
+                "No Wayland session detected. This app supports labwc and niri, which \
+                 expose zwlr_output_manager_v1.",
             ));
         }
 
@@ -213,8 +213,8 @@ impl OutputBackend for WlrRandrBackend {
                     if !found {
                         return Ok(BackendInfo::unsupported(
                             "This compositor does not support zwlr_output_manager_v1. \
-                             The app targets labwc; other wlroots-based compositors may work \
-                             but are not supported. GNOME, KDE and Hyprland are not supported.",
+                             The app supports labwc and niri; other compositors may work \
+                             but are untested. GNOME, KDE and Hyprland are not supported.",
                         ));
                     }
                     return Ok(BackendInfo {
