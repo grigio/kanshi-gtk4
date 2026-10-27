@@ -2,8 +2,6 @@
 
 <img src="kanshi-gtk4.png" alt="kanshi-gtk4 showing four layout presets and a live display preview" width="420">
 
-*Running on niri: a 3120×2080 laptop panel and a 1920×1200 external monitor.*
-
 Arrange displays on Wayland and save the layout as a
 [kanshi](https://gitlab.freedesktop.org/emersion/kanshi) profile — a small
 GTK4 / libadwaita app.
