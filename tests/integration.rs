@@ -91,6 +91,52 @@ fn custom_mode_applies_and_is_persisted_as_mode_custom() {
 }
 
 #[test]
+fn cosmic_mirror_apply_asks_for_a_native_mirror() {
+    let session = MockSession::new();
+    session.use_wlr_engine();
+    session.enable_native_mirror();
+
+    let tx =
+        apply::prepare_and_apply(session.apply_params(session.mirror_plan(), 30)).expect("apply");
+    assert_eq!(tx.engine, EngineKind::Wlr);
+
+    // COSMIC needs the extra command: overlapping heads do not mirror.
+    assert_eq!(session.cosmic_calls(), vec!["mirror DP-1 eDP-1"]);
+
+    apply::finalize_keep(&tx).expect("keep");
+    let config = session.config_text();
+    let start = config.find("profile auto-mirror").expect("mirror profile");
+    let mirror = config[start..].split("\nprofile ").next().unwrap();
+    assert!(
+        mirror.contains("exec ") && mirror.contains("mirror DP-1 eDP-1"),
+        "missing exec line in:\n{mirror}"
+    );
+}
+
+#[test]
+fn extend_apply_does_not_touch_the_compositor_mirror() {
+    let session = MockSession::new();
+    session.use_wlr_engine();
+    session.enable_native_mirror();
+
+    let tx =
+        apply::prepare_and_apply(session.apply_params(session.extend_plan(), 30)).expect("apply");
+    assert!(
+        session.cosmic_calls().is_empty(),
+        "{:?}",
+        session.cosmic_calls()
+    );
+    apply::finalize_keep(&tx).expect("keep");
+    let config = session.config_text();
+    let start = config.find("profile auto-extend").unwrap();
+    let extend = config[start..].split("\nprofile ").next().unwrap();
+    assert!(!extend.contains("exec "), "{extend}");
+    // The mirror profile is still generated for this output set, so it keeps
+    // its own exec line: switching to it later must still mirror.
+    assert!(config.contains("exec ") && config.contains("mirror DP-1 eDP-1"));
+}
+
+#[test]
 fn revert_restores_outputs_and_config_bytes() {
     let session = MockSession::new();
     session.use_wlr_engine();

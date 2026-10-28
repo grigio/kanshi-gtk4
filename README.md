@@ -63,6 +63,9 @@ sudo pacman -S wlr-randr kanshi
 
 > **COSMIC users:** `cosmic-comp-traffic` 1.11.0 and later works: all four
 > presets, dragging, scaling and the managed kanshi block were verified on it.
+> Mirroring needs `cosmic-randr` (package `cosmic-randr`) or it falls back to
+> two independent heads at the same position, which on COSMIC shows windows on
+> the panel only.
 > cosmic-comp keeps output positions as unsigned values, so a layout that would
 > start at a negative coordinate is shifted into the positive quadrant
 > (`external at -1920,0` comes back as `external 0,0 / panel 1920,0`). The app
@@ -213,6 +216,16 @@ scale_ext = max(ext_mode_w / internal_logical_w, ext_mode_h / internal_logical_h
 clamped to 0.5–3.0 and rounded to three decimals. For 1920×1200 against
 1560×1040 this gives 1.231 and a 1560×975 external area; the UI shows a note
 when the result is not exact.
+
+**COSMIC is the exception:** it keeps a separate workspace set per output, so
+two heads at `0,0` share the pointer but not the windows — the external display
+stays empty and windows only show on the panel. The app therefore asks the
+compositor for a real mirror, `cosmic-randr mirror <external> <internal>`, both
+right after applying a Mirror layout and through an `exec` line inside the
+generated mirror profile, so a later profile switch re-creates it too. This
+needs `cosmic-randr` in `PATH`; without it the app falls back to the overlapping
+layout. `KANSHI_GTK4_NATIVE_MIRROR=1|0` forces the behaviour on or off and
+`KANSHI_GTK4_COSMIC_RANDR=/path/to/cosmic-randr` picks another binary.
 
 **Validation** rejects zero enabled outputs, unknown modes, scales outside
 0.5–3.0 and invalid logical sizes. Overlapping outputs outside Mirror are
@@ -379,7 +392,8 @@ current panel.
 
 - Mirroring is approximate when the two panels have different logical sizes;
   the UI shows the visible area. There is no clone-and-scale operation in
-  Wayland.
+  Wayland, except COSMIC's native mirror (`cosmic-randr mirror`), which needs
+  `cosmic-randr` installed.
 - Presets handle the internal panel plus one external display. Extra outputs
   are listed and editable, but not auto-positioned.
 - Only the external display can be dragged; the internal panel stays at the

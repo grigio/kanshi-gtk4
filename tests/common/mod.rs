@@ -40,10 +40,13 @@ const ENV_VARS: &[&str] = &[
     "KANSHI_GTK4_WAYLAND_INFO",
     "KANSHI_GTK4_WATCHDOG_BIN",
     "KANSHI_GTK4_NOTIFY_SEND",
+    "KANSHI_GTK4_NATIVE_MIRROR",
+    "KANSHI_GTK4_COSMIC_RANDR",
     "MOCK_WLR_STATE",
     "MOCK_KANSHI_CONFIG",
     "MOCK_WLR_LOG",
     "MOCK_KANSHI_LOG",
+    "MOCK_COSMIC_RANDR_LOG",
     "MOCK_WLR_DRYRUN_FAIL",
     "MOCK_WLR_CANCEL",
     "MOCK_WLR_IGNORE_APPLY",
@@ -70,6 +73,7 @@ pub struct MockSession {
     pub kanshi_ctl: PathBuf,
     pub wlr_log: PathBuf,
     pub kanshi_log: PathBuf,
+    pub cosmic_log: PathBuf,
     pub set_key: String,
     pub internal: Option<String>,
     pub external: Option<String>,
@@ -96,6 +100,7 @@ impl MockSession {
 
         let wlr = copy_script("mock-wlr-randr", &bin.join("wlr-randr"));
         let kanshictl = copy_script("mock-kanshictl", &bin.join("kanshictl"));
+        let cosmic_randr = copy_script("mock-cosmic-randr", &bin.join("cosmic-randr"));
         let wayland_info = bin.join("wayland-info");
         fs::write(
             &wayland_info,
@@ -121,6 +126,7 @@ impl MockSession {
         let state_path = root.join("state/state.json");
         let wlr_log = root.join("wlr-randr.log");
         let kanshi_log = root.join("kanshictl.log");
+        let cosmic_log = root.join("cosmic-randr.log");
 
         std::env::set_var("KANSHI_GTK4_WLR_RANDR", &wlr);
         std::env::set_var("KANSHI_GTK4_KANSHICTL", &kanshictl);
@@ -130,6 +136,11 @@ impl MockSession {
             env!("CARGO_BIN_EXE_kanshi-gtk4"),
         );
         std::env::set_var("KANSHI_GTK4_NOTIFY_SEND", "/bin/true");
+        // Never touch the real compositor: tests that need native mirroring
+        // opt in and get the mock above.
+        std::env::set_var("KANSHI_GTK4_NATIVE_MIRROR", "0");
+        std::env::set_var("KANSHI_GTK4_COSMIC_RANDR", &cosmic_randr);
+        std::env::set_var("MOCK_COSMIC_RANDR_LOG", &cosmic_log);
         std::env::set_var("MOCK_WLR_STATE", &display_state);
         std::env::set_var("MOCK_KANSHI_CONFIG", &config_path);
         std::env::set_var("MOCK_WLR_LOG", &wlr_log);
@@ -145,6 +156,7 @@ impl MockSession {
             kanshi_ctl: kanshictl,
             wlr_log,
             kanshi_log,
+            cosmic_log,
             set_key,
             internal: internal.map(str::to_string),
             external: external.map(str::to_string),
@@ -230,6 +242,34 @@ impl MockSession {
             self.external.as_deref(),
             &scales,
         )
+    }
+
+    /// Mirror plan: the external head shows the same content as the panel.
+    pub fn mirror_plan(&self) -> LayoutPlan {
+        let outputs = self.outputs();
+        let scales: BTreeMap<String, f64> = outputs
+            .iter()
+            .map(|output| (output.name.clone(), output.scale))
+            .collect();
+        LayoutPlan::from_outputs(
+            &outputs,
+            LayoutKind::Mirror,
+            self.internal.as_deref(),
+            self.external.as_deref(),
+            &scales,
+        )
+    }
+
+    /// Pretend this is a COSMIC session with `cosmic-randr` installed.
+    pub fn enable_native_mirror(&self) {
+        std::env::set_var("KANSHI_GTK4_NATIVE_MIRROR", "1");
+    }
+
+    /// Lines passed to the mock `cosmic-randr`, oldest first.
+    pub fn cosmic_calls(&self) -> Vec<String> {
+        fs::read_to_string(&self.cosmic_log)
+            .map(|text| text.lines().map(str::to_string).collect())
+            .unwrap_or_default()
     }
 
     pub fn apply_params(&self, plan: LayoutPlan, timeout_secs: u32) -> ApplyParams {

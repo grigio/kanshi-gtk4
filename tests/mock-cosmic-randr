@@ -1,0 +1,6 @@
+#!/bin/sh
+# Mock `cosmic-randr` for the integration tests: log the arguments and succeed.
+if [ -n "$MOCK_COSMIC_RANDR_LOG" ]; then
+    echo "$*" >>"$MOCK_COSMIC_RANDR_LOG"
+fi
+exit 0

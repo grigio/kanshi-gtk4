@@ -1,5 +1,6 @@
 //! Output backends. v1 ships the `wlr-randr` shell-out backend.
 
+pub mod cosmic;
 #[cfg(test)]
 pub mod fake;
 pub mod wlr_randr;

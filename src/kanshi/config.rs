@@ -212,7 +212,15 @@ impl CurrentLayout {
 }
 
 /// Generate the complete managed block for all known sets, current one first.
-pub fn generate_managed_block(state: &AppState, current: Option<&CurrentLayout>) -> String {
+///
+/// `native_mirror` adds an `exec cosmic-randr mirror …` line to mirror
+/// profiles, for compositors (COSMIC) where two outputs at the same position
+/// do not show the same content.
+pub fn generate_managed_block(
+    state: &AppState,
+    current: Option<&CurrentLayout>,
+    native_mirror: bool,
+) -> String {
     let mut sets: Vec<GenSet> = Vec::new();
     if let Some(current) = current {
         sets.push(GenSet::from_plan(
@@ -234,7 +242,7 @@ pub fn generate_managed_block(state: &AppState, current: Option<&CurrentLayout>)
     let mut used_names = BTreeSet::new();
     let mut profiles = Vec::new();
     for set in &sets {
-        profiles.extend(render_set(set, &mut used_names));
+        profiles.extend(render_set(set, &mut used_names, native_mirror));
     }
 
     let mut text = String::new();
@@ -285,7 +293,7 @@ fn clean_description(output: &Output) -> String {
         .to_string()
 }
 
-fn render_set(set: &GenSet, used_names: &mut BTreeSet<String>) -> Vec<String> {
+fn render_set(set: &GenSet, used_names: &mut BTreeSet<String>, native_mirror: bool) -> Vec<String> {
     let applicable = set.applicable_layouts();
     let mut layouts: Vec<LayoutKind> = Vec::new();
     if set.default_layout == LayoutKind::Custom && set.custom_plan.is_some() {
@@ -312,7 +320,7 @@ fn render_set(set: &GenSet, used_names: &mut BTreeSet<String>) -> Vec<String> {
         } else {
             format!("# {} {when_connected}", kind.label())
         };
-        rendered.push(render_profile(&name, &comment, &plan));
+        rendered.push(render_profile(&name, &comment, &plan, native_mirror));
     }
     rendered
 }
@@ -369,7 +377,7 @@ fn sanitise_suffix(key: &str) -> String {
         .join("+")
 }
 
-fn render_profile(name: &str, comment: &str, plan: &LayoutPlan) -> String {
+fn render_profile(name: &str, comment: &str, plan: &LayoutPlan, native_mirror: bool) -> String {
     let mut text = String::new();
     text.push_str(comment);
     text.push('\n');
@@ -396,8 +404,36 @@ fn render_profile(name: &str, comment: &str, plan: &LayoutPlan) -> String {
         }
         text.push_str("\t}\n");
     }
+    // Overlap alone is not a mirror on COSMIC: the profile has to ask the
+    // compositor for one, or only the pointer is shared between the heads.
+    if native_mirror && plan.kind == LayoutKind::Mirror {
+        if let Some((external, internal)) = mirror_pair(plan) {
+            text.push_str(&format!(
+                "\texec {}\n",
+                crate::backend::cosmic::mirror_command(&external, &internal)
+            ));
+        }
+    }
     text.push_str("}\n");
     text
+}
+
+/// The (external, internal) pair a mirror plan shows. COSMIC mirrors the
+/// external head onto the built-in panel, which stays the source of truth.
+fn mirror_pair(plan: &LayoutPlan) -> Option<(String, String)> {
+    let mut internal = None;
+    let mut external = None;
+    for (name, output) in &plan.outputs {
+        if !output.enabled {
+            continue;
+        }
+        if is_internal_name(name) {
+            internal.get_or_insert_with(|| name.clone());
+        } else {
+            external.get_or_insert_with(|| name.clone());
+        }
+    }
+    Some((external?, internal?))
 }
 
 /// Replace the managed block, or insert it at the top on first run. Text
@@ -569,7 +605,7 @@ mod tests {
             &scales,
         );
         let current = CurrentLayout::new("eDP-1+DP-1".into(), plan, live, scales);
-        let block = generate_managed_block(&AppState::default(), Some(&current));
+        let block = generate_managed_block(&AppState::default(), Some(&current), false);
         assert!(block.starts_with(BLOCK_START));
         assert!(block.contains("profile auto-extend {"));
         assert!(block.contains("profile auto-mirror {"));
@@ -594,7 +630,7 @@ mod tests {
         plan.outputs.get_mut("eDP-1").unwrap().mode = mode;
 
         let current = CurrentLayout::new("eDP-1".into(), plan, live, scales);
-        let block = generate_managed_block(&AppState::default(), Some(&current));
+        let block = generate_managed_block(&AppState::default(), Some(&current), false);
         assert!(block.contains("mode --custom 1920x1280@120"), "{block}");
         assert!(!block.contains("mode 1920x1280@120"), "{block}");
     }
@@ -612,7 +648,7 @@ mod tests {
         output.mode = "1920x1280@120".into();
         output.custom = true;
 
-        let block = generate_managed_block(&state, None);
+        let block = generate_managed_block(&state, None, false);
         assert!(block.contains("mode --custom 1920x1280@120"), "{block}");
     }
 
@@ -632,11 +668,44 @@ mod tests {
         assert!((plan.outputs["DP-1"].scale - 1.231).abs() < 0.001);
 
         let current = CurrentLayout::new("eDP-1+DP-1".into(), plan, live, desktop_scales);
-        let block = generate_managed_block(&AppState::default(), Some(&current));
+        let block = generate_managed_block(&AppState::default(), Some(&current), false);
         let start = block.find("profile auto-extend").unwrap();
         let extend = block[start..].split("\nprofile ").next().unwrap();
         assert!(extend.contains("scale 1.5"), "{extend}");
         assert!(!extend.contains("1.231"), "{extend}");
+    }
+
+    #[test]
+    fn mirror_profiles_carry_the_native_mirror_command() {
+        let live = two_live();
+        let mut scales = BTreeMap::new();
+        scales.insert("eDP-1".to_string(), 2.0);
+        scales.insert("DP-1".to_string(), 1.5);
+        let plan = LayoutPlan::from_outputs(
+            &live,
+            LayoutKind::Mirror,
+            Some("eDP-1"),
+            Some("DP-1"),
+            &scales,
+        );
+        let current = CurrentLayout::new("eDP-1+DP-1".into(), plan, live, scales);
+
+        let block = generate_managed_block(&AppState::default(), Some(&current), true);
+        let start = block.find("profile auto-mirror").unwrap();
+        let mirror = block[start..].split("\nprofile ").next().unwrap();
+        assert!(
+            mirror.contains("\n\texec ") && mirror.contains("mirror DP-1 eDP-1\n"),
+            "{mirror}"
+        );
+
+        // Only mirror profiles ask the compositor for a mirror.
+        let start = block.find("profile auto-extend").unwrap();
+        let extend = block[start..].split("\nprofile ").next().unwrap();
+        assert!(!extend.contains("exec "), "{extend}");
+
+        // Without native mirroring (sway, labwc, niri) the config is unchanged.
+        let block = generate_managed_block(&AppState::default(), Some(&current), false);
+        assert!(!block.contains("exec "), "{block}");
     }
 
     #[test]
@@ -648,7 +717,7 @@ mod tests {
         let plan =
             LayoutPlan::from_outputs(&live, LayoutKind::Single, Some("eDP-1"), None, &scales);
         let current = CurrentLayout::new("eDP-1".into(), plan, live, scales);
-        let block = generate_managed_block(&AppState::default(), Some(&current));
+        let block = generate_managed_block(&AppState::default(), Some(&current), false);
         assert!(!block.contains(", ,"), "{block}");
         assert!(!block.contains("EDO EDO14.55, ,"), "{block}");
         assert!(
@@ -694,7 +763,7 @@ mod tests {
                 outputs,
             },
         );
-        let block = generate_managed_block(&state, None);
+        let block = generate_managed_block(&state, None, false);
         assert_eq!(block.matches("profile auto-extend--").count(), 1);
         assert!(block.contains("auto-extend--edp-1+hdmi-a-1"));
         assert!(!block.contains("auto-extend--edp-1+dp-1"));

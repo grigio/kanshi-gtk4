@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::backend::cosmic;
 use crate::backend::wlr_randr::WlrRandrBackend;
 use crate::backend::OutputBackend;
 use crate::config::{AppState, Paths};
@@ -12,7 +13,7 @@ use crate::kanshi::config::{
     generate_managed_block, merge_managed_block, write_config, write_keep_backup, CurrentLayout,
 };
 use crate::kanshi::ctl::KanshiClient;
-use crate::model::layout::{validate, LayoutPlan};
+use crate::model::layout::{validate, LayoutKind, LayoutPlan};
 use crate::model::output::Output;
 use crate::model::snapshot::{EngineKind, Snapshot};
 use crate::util;
@@ -150,6 +151,31 @@ fn describe_mismatch(plan: &LayoutPlan, live: &[Output]) -> String {
     }
 }
 
+/// Create a native mirror when the plan asks for one and the compositor can do
+/// it. Compositors that share one global space (labwc, sway, niri) already
+/// mirror overlapping outputs, so nothing is run there.
+fn mirror_outputs(params: &ApplyParams) -> Result<()> {
+    if params.plan.kind != LayoutKind::Mirror || !cosmic::native_mirror_supported() {
+        return Ok(());
+    }
+    let (Some(internal), Some(external)) = (params.internal.as_deref(), params.external.as_deref())
+    else {
+        return Ok(());
+    };
+    let enabled = |name: &str| {
+        params
+            .plan
+            .outputs
+            .get(name)
+            .is_some_and(|output| output.enabled)
+    };
+    if !enabled(internal) || !enabled(external) {
+        return Ok(());
+    }
+    cosmic::mirror(external, internal)
+        .with_context(|| format!("mirroring {external} onto {internal}"))
+}
+
 pub fn prepare_and_apply(mut params: ApplyParams) -> Result<PreparedTx> {
     let backend = WlrRandrBackend::new();
     let kanshi = KanshiClient::new();
@@ -218,7 +244,10 @@ pub fn prepare_and_apply(mut params: ApplyParams) -> Result<PreparedTx> {
         live.clone(),
         params.desktop_scales.clone(),
     );
-    let block = generate_managed_block(&state, Some(&current));
+    // COSMIC has no overlap-based mirroring: a "Mirror" plan needs its own
+    // command, both now and inside the generated profile (see below).
+    let native_mirror = cosmic::native_mirror_supported();
+    let block = generate_managed_block(&state, Some(&current), native_mirror);
     let candidate_config = merge_managed_block(config_before.as_deref(), &block).into_bytes();
     let config_writable = util::writable_target(&config_path);
     if config_writable {
@@ -284,6 +313,14 @@ pub fn prepare_and_apply(mut params: ApplyParams) -> Result<PreparedTx> {
     if let Err(err) = apply_result {
         // Restore config/outputs; a failed apply must leave the system as it
         // was. For a dry-run failure this is a harmless no-op.
+        let _ = watchdog::restore_transaction(&dir);
+        watchdog::cancel_and_cleanup(&dir);
+        return Err(err.context("applying the display layout failed"));
+    }
+
+    // COSMIC keeps a workspace set per output, so two heads at the same
+    // position are not a mirror there: ask the compositor for a native one.
+    if let Err(err) = mirror_outputs(&params) {
         let _ = watchdog::restore_transaction(&dir);
         watchdog::cancel_and_cleanup(&dir);
         return Err(err.context("applying the display layout failed"));

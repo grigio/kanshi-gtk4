@@ -5,6 +5,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use kanshi_gtk4::application;
+use kanshi_gtk4::backend::cosmic;
 use kanshi_gtk4::config::Paths;
 use kanshi_gtk4::kanshi::config::{generate_managed_block, merge_managed_block, CurrentLayout};
 use kanshi_gtk4::session::Session;
@@ -102,7 +103,11 @@ fn print_config(paths: &Paths, verbose: bool) -> Result<()> {
         session.outputs.clone(),
         session.desktop_scales.clone(),
     );
-    let block = generate_managed_block(&session.state, Some(&current));
+    let block = generate_managed_block(
+        &session.state,
+        Some(&current),
+        cosmic::native_mirror_supported(),
+    );
     let merged = merge_managed_block(existing.as_deref(), &block);
     if verbose {
         eprintln!("config path: {}", paths.config_path.display());
