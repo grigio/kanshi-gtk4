@@ -235,6 +235,42 @@ impl LayoutPlan {
         self.outputs.values().filter(|o| o.enabled).count()
     }
 
+    /// Shift the enabled outputs so the layout starts at `(0, 0)`.
+    ///
+    /// An output layout is only defined up to a global translation: nothing
+    /// visually changes when every display moves by the same offset. Some
+    /// compositors normalise the layout themselves — COSMIC stores positions
+    /// as unsigned values and offsets any configuration with a negative
+    /// coordinate (`HDMI at -1560,0` comes back as `HDMI 0,0, eDP 1560,0`),
+    /// while labwc forwards the values unchanged.
+    ///
+    /// Normalising before applying keeps the requested plan, the written
+    /// kanshi profile and the compositor's state identical on both kinds of
+    /// compositor, so the post-apply verification cannot fail on a layout that
+    /// was in fact accepted.
+    pub fn normalize_origin(&mut self) {
+        let origin = self.outputs.values().filter(|output| output.enabled).fold(
+            None,
+            |origin: Option<(i32, i32)>, output| {
+                Some(match origin {
+                    Some((x, y)) => (x.min(output.position.0), y.min(output.position.1)),
+                    None => output.position,
+                })
+            },
+        );
+
+        let Some((origin_x, origin_y)) = origin else {
+            return;
+        };
+        if origin_x == 0 && origin_y == 0 {
+            return;
+        }
+
+        for output in self.outputs.values_mut().filter(|output| output.enabled) {
+            output.position = (output.position.0 - origin_x, output.position.1 - origin_y);
+        }
+    }
+
     /// Compare a plan with the live compositor state.
     pub fn matches_live(&self, outputs: &[Output]) -> bool {
         self.matches_live_with(outputs, true)
@@ -250,23 +286,42 @@ impl LayoutPlan {
         if self.outputs.len() != outputs.len() {
             return false;
         }
+        // Positions are only comparable up to a global translation: a
+        // compositor may move the whole layout into the positive quadrant, so
+        // the first enabled output fixes the offset the rest must share.
+        let mut anchor: Option<(i32, i32)> = None;
         outputs.iter().all(|output| {
-            self.outputs.get(&output.name).is_some_and(|plan| {
-                if plan.enabled != output.enabled {
-                    return false;
+            let Some(plan) = self.outputs.get(&output.name) else {
+                return false;
+            };
+            if plan.enabled != output.enabled {
+                return false;
+            }
+            // A disabled head has no meaningful mode, scale or position:
+            // compositors keep the last values or reset them arbitrarily.
+            if !plan.enabled {
+                return true;
+            }
+            if !plan.mode.same_timing(&output.active_mode())
+                || (plan.scale - output.scale).abs() > 0.01
+                || plan.transform != output.transform
+                || (check_adaptive_sync && plan.adaptive_sync != output.adaptive_sync)
+            {
+                return false;
+            }
+            let offset = (
+                plan.position.0 - output.position.0,
+                plan.position.1 - output.position.1,
+            );
+            match anchor {
+                None => {
+                    anchor = Some(offset);
+                    true
                 }
-                // A disabled head has no meaningful mode, scale or position:
-                // compositors keep the last values or reset them arbitrarily.
-                if !plan.enabled {
-                    return true;
+                Some(expected) => {
+                    (offset.0 - expected.0).abs() <= 2 && (offset.1 - expected.1).abs() <= 2
                 }
-                plan.mode.same_timing(&output.active_mode())
-                    && (plan.scale - output.scale).abs() <= 0.01
-                    && (plan.position.0 - output.position.0).abs() <= 2
-                    && (plan.position.1 - output.position.1).abs() <= 2
-                    && plan.transform == output.transform
-                    && (!check_adaptive_sync || plan.adaptive_sync == output.adaptive_sync)
-            })
+            }
         })
     }
 }
@@ -551,6 +606,65 @@ mod tests {
         assert_eq!(p.outputs["DP-1"].position, (0, 0));
         assert!((p.outputs["DP-1"].scale - 1.231).abs() < 0.001);
         assert_eq!(p.outputs["DP-1"].logical_size(), (1560, 975));
+    }
+
+    #[test]
+    fn normalize_origin_keeps_the_relative_layout() {
+        let mut p = plan(LayoutKind::Extend);
+        // The external display was dragged to the left of the laptop panel.
+        p.outputs.get_mut("DP-1").unwrap().position = (-1560, 0);
+        p.normalize_origin();
+        assert_eq!(p.outputs["DP-1"].position, (0, 0));
+        assert_eq!(p.outputs["eDP-1"].position, (1560, 0));
+    }
+
+    #[test]
+    fn normalize_origin_handles_both_axes_and_is_idempotent() {
+        let mut p = plan(LayoutKind::Extend);
+        p.outputs.get_mut("DP-1").unwrap().position = (-1560, -40);
+        p.normalize_origin();
+        let once = p.clone();
+        assert_eq!(p.outputs["DP-1"].position, (0, 0));
+        assert_eq!(p.outputs["eDP-1"].position, (1560, 40));
+        p.normalize_origin();
+        assert_eq!(p, once);
+    }
+
+    #[test]
+    fn normalize_origin_ignores_disabled_outputs() {
+        let mut p = plan(LayoutKind::Single);
+        p.outputs.get_mut("DP-1").unwrap().position = (-500, -500);
+        p.normalize_origin();
+        // The disabled head keeps its stale position; it is not part of the
+        // layout the compositor sees.
+        assert_eq!(p.outputs["DP-1"].position, (-500, -500));
+        assert_eq!(p.outputs["eDP-1"].position, (0, 0));
+    }
+
+    #[test]
+    fn matches_live_accepts_a_translated_layout() {
+        // COSMIC answers with the whole layout moved into the positive
+        // quadrant: eDP 0,0 -> 1560,0 and DP -1560,0 -> 0,0. The arrangement
+        // is the same one the user asked for.
+        let mut live = two();
+        live[0].position = (1560, 0);
+        live[1].position = (0, 0);
+        let mut p = plan(LayoutKind::Extend);
+        p.outputs.get_mut("DP-1").unwrap().position = (-1560, 0);
+        assert!(p.matches_live(&live));
+    }
+
+    #[test]
+    fn matches_live_rejects_a_different_arrangement() {
+        // The plan keeps the external display on the left, the compositor put
+        // it on the right: that is a real mismatch, not a translation.
+        let mut live = two();
+        live[0].position = (0, 0);
+        live[1].position = (1560, 0);
+        let mut p = plan(LayoutKind::Extend);
+        p.outputs.get_mut("eDP-1").unwrap().position = (1560, 0);
+        p.outputs.get_mut("DP-1").unwrap().position = (0, 0);
+        assert!(!p.matches_live(&live));
     }
 
     #[test]

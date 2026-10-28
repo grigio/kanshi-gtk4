@@ -76,6 +76,19 @@ fn reload_kanshi(kanshi: &KanshiClient) -> Result<()> {
 fn describe_mismatch(plan: &LayoutPlan, live: &[Output]) -> String {
     let on_off = |on: bool| if on { "on" } else { "off" };
     let mut parts = Vec::new();
+    // Positions are compared relative to the first enabled output, because a
+    // compositor may translate the whole layout (see `normalize_origin`).
+    let anchor = plan
+        .outputs
+        .iter()
+        .find(|(name, planned)| planned.enabled && live.iter().any(|output| &&output.name == name))
+        .map(|(name, planned)| {
+            let actual = live
+                .iter()
+                .find(|output| &output.name == name)
+                .expect("checked by find above");
+            (name.clone(), planned.position, actual.position)
+        });
     for (name, planned) in &plan.outputs {
         let Some(actual) = live.iter().find(|output| &output.name == name) else {
             parts.push(format!("{name}: not connected"));
@@ -106,13 +119,21 @@ fn describe_mismatch(plan: &LayoutPlan, live: &[Output]) -> String {
                 crate::model::layout::format_scale(actual.scale)
             ));
         }
-        if (planned.position.0 - actual.position.0).abs() > 2
-            || (planned.position.1 - actual.position.1).abs() > 2
-        {
-            parts.push(format!(
-                "{name}: wanted position {},{} got {},{}",
-                planned.position.0, planned.position.1, actual.position.0, actual.position.1
-            ));
+        if let Some((anchor_name, anchor_planned, anchor_live)) = &anchor {
+            let wanted = (
+                planned.position.0 - anchor_planned.0,
+                planned.position.1 - anchor_planned.1,
+            );
+            let got = (
+                actual.position.0 - anchor_live.0,
+                actual.position.1 - anchor_live.1,
+            );
+            if (wanted.0 - got.0).abs() > 2 || (wanted.1 - got.1).abs() > 2 {
+                parts.push(format!(
+                    "{name}: wanted {},{} relative to {anchor_name}, got {},{}",
+                    wanted.0, wanted.1, got.0, got.1
+                ));
+            }
         }
         if planned.transform != actual.transform {
             parts.push(format!(
@@ -129,7 +150,7 @@ fn describe_mismatch(plan: &LayoutPlan, live: &[Output]) -> String {
     }
 }
 
-pub fn prepare_and_apply(params: ApplyParams) -> Result<PreparedTx> {
+pub fn prepare_and_apply(mut params: ApplyParams) -> Result<PreparedTx> {
     let backend = WlrRandrBackend::new();
     let kanshi = KanshiClient::new();
     let root = params.paths.transaction_root();
@@ -153,6 +174,10 @@ pub fn prepare_and_apply(params: ApplyParams) -> Result<PreparedTx> {
     if !validation.is_valid() {
         bail!("{}", validation.errors.join(" "));
     }
+    // Anchor the layout at (0, 0) before anything is sent or written: COSMIC
+    // would otherwise shift a negative coordinate and the verification below
+    // would reject a layout the compositor had just accepted.
+    params.plan.normalize_origin();
 
     let info = kanshi.detect(&params.paths.config_path);
     let engine = if info.engine_usable {

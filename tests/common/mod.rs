@@ -47,6 +47,7 @@ const ENV_VARS: &[&str] = &[
     "MOCK_WLR_DRYRUN_FAIL",
     "MOCK_WLR_CANCEL",
     "MOCK_WLR_IGNORE_APPLY",
+    "MOCK_WLR_NORMALIZE_ORIGIN",
     "MOCK_KANSHI_STATUS_FAIL",
     "MOCK_KANSHI_RELOAD_FAIL",
     "MOCK_KANSHI_IGNORE_ENABLE",
@@ -154,6 +155,33 @@ impl MockSession {
     /// Use `WlrEngine`: pretend kanshictl is not installed.
     pub fn use_wlr_engine(&self) {
         std::env::set_var("KANSHI_GTK4_KANSHICTL", "/nonexistent/kanshictl");
+    }
+
+    /// Make the mock compositor behave like COSMIC: positions are unsigned, so
+    /// a configuration with a negative coordinate is shifted into the positive
+    /// quadrant instead of being applied verbatim (what labwc does).
+    pub fn normalize_origin_like_cosmic(&self) {
+        std::env::set_var("MOCK_WLR_NORMALIZE_ORIGIN", "1");
+    }
+
+    /// Move the external display to the left of the built-in panel, the layout
+    /// that produces a negative x coordinate.
+    pub fn extend_left_plan(&self) -> LayoutPlan {
+        let mut plan = self.extend_plan();
+        if let Some(external) = self.external.as_deref() {
+            if let Some(panel) = self.internal.as_deref() {
+                let panel_width = plan
+                    .outputs
+                    .get(panel)
+                    .map(|output| output.logical_size().0)
+                    .unwrap_or(0);
+                if let Some(output) = plan.outputs.get_mut(external) {
+                    output.position = (-panel_width, 0);
+                }
+            }
+        }
+        plan.kind = LayoutKind::Custom;
+        plan
     }
 
     pub fn paths(&self) -> Paths {

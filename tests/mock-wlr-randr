@@ -16,6 +16,9 @@ Failure injection (all optional):
     MOCK_WLR_CANCEL=1        apply exits 1 with "configuration cancelled"
     MOCK_WLR_IGNORE_APPLY=1  apply exits 0 but changes nothing (verification
                              mismatch)
+    MOCK_WLR_NORMALIZE_ORIGIN=1  accept the configuration but store positions
+                             unsigned, like COSMIC: a negative coordinate moves
+                             the whole layout into the positive quadrant
     MOCK_WLR_LOG=path        append one line per invocation
 """
 
@@ -155,5 +158,18 @@ if os.environ.get("MOCK_WLR_CANCEL") == "1":
     fail("configuration cancelled, please try again")
 if os.environ.get("MOCK_WLR_IGNORE_APPLY") == "1":
     sys.exit(0)
+
+if os.environ.get("MOCK_WLR_NORMALIZE_ORIGIN") == "1":
+    # COSMIC keeps output positions unsigned and offsets a whole configuration
+    # that contains a negative coordinate, instead of rejecting or applying it
+    # verbatim.
+    enabled = [output for output in data if output["enabled"]]
+    if enabled:
+        min_x = min(output["position"]["x"] for output in enabled)
+        min_y = min(output["position"]["y"] for output in enabled)
+        if min_x < 0 or min_y < 0:
+            for output in enabled:
+                output["position"]["x"] -= min_x
+                output["position"]["y"] -= min_y
 
 save(data)

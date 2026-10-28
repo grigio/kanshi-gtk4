@@ -368,6 +368,36 @@ fn verification_mismatch_reverts_and_reports() {
     assert!(session.pending_dirs().is_empty());
 }
 
+/// COSMIC stores output positions as unsigned values and shifts a
+/// configuration with a negative coordinate into the positive quadrant. The
+/// layout is accepted (the external display really is on the left), so the
+/// apply must not be reported as a failure and reverted.
+#[test]
+fn left_of_panel_layout_is_kept_when_the_compositor_normalizes_it() {
+    let session = MockSession::new();
+    session.use_wlr_engine();
+    session.normalize_origin_like_cosmic();
+    let before = session.config();
+
+    let tx = apply::prepare_and_apply(session.apply_params(session.extend_left_plan(), 30))
+        .expect("apply must be accepted");
+
+    // The compositor moved the whole layout to the origin...
+    assert_eq!(session.output("DP-1").position, (0, 0));
+    assert_eq!(session.output("eDP-1").position, (1560, 0));
+    // ...and the transaction is still pending, not reverted.
+    assert_eq!(session.config(), before);
+    assert_eq!(session.pending_dirs().len(), 1);
+
+    apply::finalize_keep(&tx).expect("keep");
+    // The saved profile keeps the relative arrangement, at (0, 0).
+    let config = session.config_text();
+    assert!(config.contains("output DP-1 {"), "{config}");
+    assert!(config.contains("position 0,0"), "{config}");
+    assert!(config.contains("position 1560,0"), "{config}");
+    assert!(session.pending_dirs().is_empty());
+}
+
 #[test]
 fn print_config_cli_writes_a_managed_block() {
     let session = MockSession::new();
