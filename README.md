@@ -27,11 +27,11 @@ writes it to `~/.config/kanshi/config`, so it survives reboot and hotplug.
 
 - **GTK 4.18+ / libadwaita 1.7+** — the oldest GUI stack the source builds
   against, which also makes the app installable on Debian 13 (trixie).
-- **labwc, niri or sway (1.11+)** — supported compositors. All implement
-  `zwlr_output_manager_v1`, the protocol this app drives. Other compositors
-  exposing the same protocol may work but are untested.
-  **GNOME, KDE and Hyprland are not supported** (they do not expose the
-  protocol).
+- **labwc, niri, sway (1.11+) or COSMIC (cosmic-comp 1.11+)** — supported
+  compositors. All implement `zwlr_output_manager_v1`, the protocol this app
+  drives. Other compositors exposing the same protocol may work but are
+  untested. **GNOME, KDE and Hyprland are not supported** (they do not expose
+  the protocol).
 - [`wlr-randr`](https://gitlab.freedesktop.org/emersion/wlr-randr) — required.
 - [kanshi](https://gitlab.freedesktop.org/emersion/kanshi) — optional, needed
   to persist the layout across reboot and hotplug.
@@ -49,7 +49,8 @@ sudo pacman -S wlr-randr kanshi
 | sway | yes, v4 (1.11+) | supported |
 | river | yes, v4 (0.3.13+) | untested, should work |
 | wayfire | yes, v4 (0.9+) | untested, should work |
-| Cage / COSMIC / phoc | yes, v4 | untested, should work |
+| Cage / phoc | yes, v4 | untested, should work |
+| COSMIC (cosmic-comp 1.11+) | yes, v4 verified | supported |
 | Hyprland | no (`hyprctl` instead) | not supported |
 | GNOME / KDE | no | not supported |
 | X11 / XWayland session | n/a | not supported |
@@ -60,10 +61,22 @@ sudo pacman -S wlr-randr kanshi
 > `wlr-randr` (empty output means the protocol is missing) and use sway 1.11+
 > or a different compositor.
 
-Tested on labwc 0.20.2 and niri with a Xiaomi Book Pro 14 (eDP-1, 3120×2080)
-and a Dell E248WFP (1920×1200). Connector names, modes, refresh rates and
-scales are read from `wlr-randr` at runtime: nothing about a particular display
-is hardcoded, and each output has its own resolution and refresh picker.
+> **COSMIC users:** `cosmic-comp-traffic` 1.11.0 and later works: all four
+> presets, dragging, scaling and the managed kanshi block were verified on it.
+> cosmic-comp keeps output positions as unsigned values, so a layout that would
+> start at a negative coordinate is shifted into the positive quadrant
+> (`external at -1920,0` comes back as `external 0,0 / panel 1920,0`). The app
+> therefore normalises every layout to `0,0` before applying it and compares
+> the result up to a global translation, so an external display placed on the
+> left of the panel is no longer reverted. Disabling an output used to abort
+> cosmic-comp through an `unwrap()` on the removed output's workspace set; those
+> fixes ship in `cosmic-comp-traffic` 1:1.11.0-8 and later.
+
+Tested on labwc 0.20.2, niri and cosmic-comp-traffic 1.11.0 with a Xiaomi Book
+Pro 14 (eDP-1, 3120×2080) and a Dell E248WFP (1920×1200). Connector names,
+modes, refresh rates and scales are read from `wlr-randr` at runtime: nothing
+about a particular display is hardcoded, and each output has its own resolution
+and refresh picker.
 
 ## Build and run
 
@@ -182,7 +195,11 @@ swapping width and height. For example, 3120×2080 at scale 2 is 1560×1040;
 Presets anchor the built-in panel at `0,0` and place the external display to
 its right for Extend. A manual drag switches the plan to **Custom** and keeps
 the live positions. Changing mode, scale or rotation in a preset recomputes
-the positions; disabling an output keeps its settings.
+the positions; disabling an output keeps its settings. Before a layout is
+applied or written to kanshi it is moved so that the top-left of the bounding
+box is `0,0`: a layout is only meaningful up to a global translation, and this
+keeps compositors that refuse negative coordinates (COSMIC) in sync with the
+saved profile.
 
 **Mirroring** places both outputs at `0,0`. Wayland has no clone-and-scale
 operation, so each output renders its own viewport of the same scene; if the
@@ -365,7 +382,9 @@ current panel.
   Wayland.
 - Presets handle the internal panel plus one external display. Extra outputs
   are listed and editable, but not auto-positioned.
-- Only the external display can be dragged; the laptop panel stays at `0,0`.
+- Only the external display can be dragged; the internal panel stays at the
+  origin of the presets. A custom layout is normalised to `0,0`, so a display
+  dragged to the left of the panel becomes the new origin.
 - If the applied layout turns off the display showing the countdown, the
   dialog may not be visible. The watchdog still reverts after 10 seconds.
 - Unplugging a display during the countdown aborts the transaction and
