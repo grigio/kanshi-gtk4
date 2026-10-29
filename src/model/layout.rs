@@ -367,6 +367,27 @@ pub fn detect_layout(
     if outputs.is_empty() {
         return LayoutKind::Custom;
     }
+    // Heads placed at the same position are a mirror on every compositor:
+    // Wayland has no clone-and-scale, so overlapping is how the same picture
+    // is shown twice. COSMIC needs an explicit mirror command for this
+    // (overlap alone only shares the pointer), and its external head often
+    // keeps a desktop scale instead of the fitted mirror scale, so recognise
+    // the arrangement before comparing against the presets. Otherwise the
+    // saved default profile is a custom overlap that restores pointer-only
+    // mirroring after a hotplug.
+    if internal != external {
+        let position = |name: &str| {
+            outputs
+                .iter()
+                .find(|output| output.name == name && output.enabled)
+                .map(|output| output.position)
+        };
+        if let (Some(internal), Some(external)) = (internal, external) {
+            if position(internal).is_some() && position(internal) == position(external) {
+                return LayoutKind::Mirror;
+            }
+        }
+    }
     let live_scales: BTreeMap<String, f64> =
         outputs.iter().map(|o| (o.name.clone(), o.scale)).collect();
 
@@ -465,13 +486,16 @@ pub fn validate(plan: &LayoutPlan, connected: &[Output]) -> Validation {
         }
     }
 
-    // Overlap warnings (exact mirroring is expected to overlap).
+    // Overlap warnings (exact mirroring is expected to overlap). Heads at the
+    // same origin are a mirror even when the plan is Custom, so do not warn
+    // about those: only a partial overlap is a real mistake.
     for i in 0..rects.len() {
         for j in (i + 1)..rects.len() {
             let a = &rects[i];
             let b = &rects[j];
             let overlap = a.1 < b.1 + b.3 && b.1 < a.1 + a.3 && a.2 < b.2 + b.4 && b.2 < a.2 + a.4;
-            if overlap && plan.kind != LayoutKind::Mirror {
+            let same_origin = a.1 == b.1 && a.2 == b.2;
+            if overlap && !same_origin && plan.kind != LayoutKind::Mirror {
                 v.warnings.push(format!("{} and {} overlap.", a.0, b.0));
             }
         }
@@ -801,6 +825,32 @@ mod tests {
         assert_eq!(
             detect_layout(&outs, Some("eDP-1"), Some("DP-1")),
             LayoutKind::Custom
+        );
+    }
+
+    #[test]
+    fn overlapping_heads_are_a_mirror_even_with_desktop_scales() {
+        // The external kept its desktop scale instead of the fitted mirror
+        // scale, but both heads sit at the same origin: that is a mirror.
+        let outs = two();
+        assert_eq!(outs[1].position, (0, 0));
+        assert_eq!(
+            detect_layout(&outs, Some("eDP-1"), Some("DP-1")),
+            LayoutKind::Mirror
+        );
+    }
+
+    #[test]
+    fn validation_does_not_warn_about_an_exact_overlap() {
+        let outs = two();
+        // A manual arrangement with both heads at the origin is a mirror.
+        let plan = plan(LayoutKind::Custom);
+        let validation = validate(&plan, &outs);
+        assert!(validation.is_valid());
+        assert!(
+            validation.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            validation.warnings
         );
     }
 

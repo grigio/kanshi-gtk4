@@ -14,6 +14,7 @@ use common::{MockSession, ALT_FIXTURE, DESKTOP_FIXTURE, LEGACY_CONFIG};
 use kanshi_gtk4::apply;
 use kanshi_gtk4::config::AppState;
 use kanshi_gtk4::kanshi::config::{BLOCK_START, PRESERVED};
+use kanshi_gtk4::model::layout::LayoutKind;
 use kanshi_gtk4::model::output::Mode;
 use kanshi_gtk4::model::snapshot::EngineKind;
 use kanshi_gtk4::watchdog;
@@ -110,6 +111,32 @@ fn cosmic_mirror_apply_asks_for_a_native_mirror() {
     assert!(
         mirror.contains("exec ") && mirror.contains("mirror DP-1 eDP-1"),
         "missing exec line in:\n{mirror}"
+    );
+}
+
+#[test]
+fn manual_overlap_apply_asks_for_a_native_mirror() {
+    let session = MockSession::new();
+    session.use_wlr_engine();
+    session.enable_native_mirror();
+
+    // The external was dragged onto the panel (or restored there after a
+    // hotplug): a manual arrangement with both heads at one origin is a
+    // mirror, so COSMIC has to be told explicitly.
+    let mut plan = session.extend_plan();
+    plan.outputs.get_mut("DP-1").unwrap().position = (0, 0);
+    plan.kind = LayoutKind::Custom;
+
+    let tx = apply::prepare_and_apply(session.apply_params(plan, 30)).expect("apply");
+    assert_eq!(session.cosmic_calls(), vec!["mirror DP-1 eDP-1"]);
+
+    apply::finalize_keep(&tx).expect("keep");
+    let config = session.config_text();
+    let start = config.find("profile auto-custom").expect("custom profile");
+    let custom = config[start..].split("\nprofile ").next().unwrap();
+    assert!(
+        custom.contains("exec ") && custom.contains("mirror DP-1 eDP-1"),
+        "missing exec line in:\n{custom}"
     );
 }
 

@@ -495,10 +495,14 @@ mod tests {
         )
         .unwrap();
         // No wlr-randr available under this name: restore fails, watchdog
-        // must report code 2 and keep the directory untouched.
+        // must report code 2 and keep the directory untouched. Point the
+        // notifier at a missing program as well: the failure body names these
+        // fake paths, so a real notification would only confuse the user.
         std::env::set_var("KANSHI_GTK4_WLR_RANDR", "/nonexistent/wlr-randr");
+        std::env::set_var("KANSHI_GTK4_NOTIFY_SEND", "/nonexistent/notify-send");
         let code = run_watchdog(dir.path(), 0);
         std::env::remove_var("KANSHI_GTK4_WLR_RANDR");
+        std::env::remove_var("KANSHI_GTK4_NOTIFY_SEND");
         assert_eq!(code, 2);
         assert!(dir.path().join("watchdog.log").exists());
     }

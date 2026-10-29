@@ -13,7 +13,7 @@ use crate::kanshi::config::{
     generate_managed_block, merge_managed_block, write_config, write_keep_backup, CurrentLayout,
 };
 use crate::kanshi::ctl::KanshiClient;
-use crate::model::layout::{validate, LayoutKind, LayoutPlan};
+use crate::model::layout::{validate, LayoutPlan};
 use crate::model::output::Output;
 use crate::model::snapshot::{EngineKind, Snapshot};
 use crate::util;
@@ -151,25 +151,36 @@ fn describe_mismatch(plan: &LayoutPlan, live: &[Output]) -> String {
     }
 }
 
-/// Create a native mirror when the plan asks for one and the compositor can do
-/// it. Compositors that share one global space (labwc, sway, niri) already
-/// mirror overlapping outputs, so nothing is run there.
+/// Create a native mirror when two heads sit at the same position and the
+/// compositor can do it. Compositors that share one global space (labwc, sway,
+/// niri) already mirror overlapping outputs, so nothing is run there; COSMIC
+/// keeps one workspace set per output, so an overlap only shares the pointer
+/// and the windows stay on the panel.
+///
+/// This runs for a manual arrangement too: the preview treats overlapping
+/// heads as a mirror, so the compositor has to as well.
 fn mirror_outputs(params: &ApplyParams) -> Result<()> {
-    if params.plan.kind != LayoutKind::Mirror || !cosmic::native_mirror_supported() {
+    if !cosmic::native_mirror_supported() {
         return Ok(());
     }
     let (Some(internal), Some(external)) = (params.internal.as_deref(), params.external.as_deref())
     else {
         return Ok(());
     };
-    let enabled = |name: &str| {
+    let enabled_position = |name: &str| {
         params
             .plan
             .outputs
             .get(name)
-            .is_some_and(|output| output.enabled)
+            .filter(|output| output.enabled)
+            .map(|output| output.position)
     };
-    if !enabled(internal) || !enabled(external) {
+    let (Some(internal_position), Some(external_position)) =
+        (enabled_position(internal), enabled_position(external))
+    else {
+        return Ok(());
+    };
+    if internal_position != external_position {
         return Ok(());
     }
     cosmic::mirror(external, internal)

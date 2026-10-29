@@ -16,7 +16,8 @@ writes it to `~/.config/kanshi/config`, so it survives reboot and hotplug.
 - Per-output resolution, refresh rate, scale, rotation, adaptive sync and
   enabled/disabled controls.
 - Lower custom resolutions for panels that advertise only their native size.
-- Live, to-scale preview; drag the external display to arrange it freely.
+- Live, to-scale preview; drag the external display and it snaps flush to the
+  closest edge of the other screen.
 - 10-second countdown with **Keep** / **Revert**, plus a detached watchdog that
   restores the previous layout even if the app crashes or is killed.
 - A marked kanshi block that survives hand-written profiles and is applied at
@@ -133,7 +134,7 @@ enough, but sway 1.10.1 is not (see the sway note above).
 | Preset | Internal | External |
 |---|---|---|
 | Laptop only | on, `0,0` | off |
-| Extend | on, `0,0` | on, `x = internal_logical_w`, `y = 0` (draggable) |
+| Extend | on, `0,0` | on, `x = internal_logical_w`, `y = 0` (draggable, snaps to an edge) |
 | Mirror | on, `0,0` | on, `0,0` |
 | External only | off | on, `0,0` |
 
@@ -155,9 +156,10 @@ aspect-preserving sizes marked `(custom)`. They are applied with the
 compositor's custom-mode request and saved to kanshi as
 `mode --custom WIDTHxHEIGHT@RATE`.
 
-Drag the external rectangle in the preview to place it anywhere; this switches
-the layout to **Custom** and keeps the live positions. The laptop panel stays
-at `0,0`.
+Drag the external rectangle in the preview to move it; while it is near the
+laptop panel it is pulled in, and it always settles flush against the closest
+side, aligned to the nearest edge or centre. This switches the layout to
+**Custom** and keeps the live positions. The laptop panel stays at `0,0`.
 
 ### Apply, keep, revert
 
@@ -197,8 +199,10 @@ swapping width and height. For example, 3120×2080 at scale 2 is 1560×1040;
 
 Presets anchor the built-in panel at `0,0` and place the external display to
 its right for Extend. A manual drag switches the plan to **Custom** and keeps
-the live positions. Changing mode, scale or rotation in a preset recomputes
-the positions; disabling an output keeps its settings. Before a layout is
+the live positions; the dragged display is magnetised to the closest side of
+the other one and aligned to its nearest edge or centre. Changing mode, scale
+or rotation in a preset recomputes the positions; disabling an output keeps its
+settings. Before a layout is
 applied or written to kanshi it is moved so that the top-left of the bounding
 box is `0,0`: a layout is only meaningful up to a global translation, and this
 keeps compositors that refuse negative coordinates (COSMIC) in sync with the
@@ -221,16 +225,18 @@ when the result is not exact.
 two heads at `0,0` share the pointer but not the windows — the external display
 stays empty and windows only show on the panel. The app therefore asks the
 compositor for a real mirror, `cosmic-randr mirror <external> <internal>`, both
-right after applying a Mirror layout and through an `exec` line inside the
-generated mirror profile, so a later profile switch re-creates it too. This
-needs `cosmic-randr` in `PATH`; without it the app falls back to the overlapping
-layout. `KANSHI_GTK4_NATIVE_MIRROR=1|0` forces the behaviour on or off and
-`KANSHI_GTK4_COSMIC_RANDR=/path/to/cosmic-randr` picks another binary.
+right after applying any layout whose heads sit at the same position and through
+an `exec` line inside the generated profile, so a hotplug or profile switch
+re-creates it too. This needs `cosmic-randr` in `PATH`; without it the app falls
+back to the overlapping layout. `KANSHI_GTK4_NATIVE_MIRROR=1|0` forces the
+behaviour on or off and `KANSHI_GTK4_COSMIC_RANDR=/path/to/cosmic-randr` picks
+another binary.
 
 **Validation** rejects zero enabled outputs, unknown modes, scales outside
 0.5–3.0 and invalid logical sizes. Overlapping outputs outside Mirror are
-warnings. Generated profiles always keep at least one output enabled, so a
-config produced by this app cannot make the desktop completely invisible.
+warnings, unless they share the same origin: an exact overlap is a mirror on
+any compositor. Generated profiles always keep at least one output enabled, so
+a config produced by this app cannot make the desktop completely invisible.
 
 ### Apply engines
 
@@ -397,8 +403,10 @@ current panel.
 - Presets handle the internal panel plus one external display. Extra outputs
   are listed and editable, but not auto-positioned.
 - Only the external display can be dragged; the internal panel stays at the
-  origin of the presets. A custom layout is normalised to `0,0`, so a display
-  dragged to the left of the panel becomes the new origin.
+  origin of the presets. The dragged display always settles flush against the
+  closest side of the other one, so arbitrary offsets are not kept. A custom
+  layout is normalised to `0,0`, so a display dragged to the left of the panel
+  becomes the new origin.
 - If the applied layout turns off the display showing the countdown, the
   dialog may not be visible. The watchdog still reverts after 10 seconds.
 - Unplugging a display during the countdown aborts the transaction and
@@ -479,3 +487,10 @@ or a second virtual output.
 ## License
 
 GPL-3.0-only. See [LICENSE](LICENSE).
+
+## Donations
+
+If you find this project helpful, please consider making a donation to support its development.
+
+- **Monero**: `88LyqYXn4LdCVDtPWKuton9hJwbo8ZduNEGuARHGdeSJ79BBYWGpMQR8VGWxGDKtTLLM6E9MJm8RvW9VMUgCcSXu19L9FSv`
+- **Bitcoin**: `bc1q6mh77hfv8x8pa0clzskw6ndysujmr78j6se025`

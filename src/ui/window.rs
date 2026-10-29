@@ -16,7 +16,7 @@ use std::time::Duration;
 use crate::apply::{self, ApplyParams, PreparedTx};
 use crate::backend::wlr_randr::WlrRandrBackend;
 use crate::backend::{BackendInfo, OutputBackend};
-use crate::config::{self, AppState, Paths};
+use crate::config::{self, AppState, Paths, APP_ID};
 use crate::kanshi::ctl::{KanshiClient, KanshiInfo};
 use crate::model::layout::{
     mirror_note, preset_available, set_key, validate, LayoutKind, LayoutPlan, OutputPlan,
@@ -280,7 +280,6 @@ pub struct Widgets {
     pub window: adw::ApplicationWindow,
     pub toast: adw::ToastOverlay,
     pub apply_button: gtk::Button,
-    pub refresh_button: gtk::Button,
     spinner: gtk::Spinner,
     presets_box: gtk::Box,
     presets: RefCell<Vec<(LayoutKind, gtk::ToggleButton)>>,
@@ -390,8 +389,6 @@ impl Widgets {
             }));
         self.spinner.set_visible(model.busy);
         self.spinner.set_spinning(model.busy);
-        self.refresh_button
-            .set_sensitive(!model.busy && model.tx.is_none());
 
         for class in ["status-ok", "status-warn", "status-error"] {
             self.status_dot.remove_css_class(class);
@@ -444,9 +441,9 @@ pub fn build(application: &adw::Application, session: Session) -> AppWindow {
     spinner.set_visible(false);
     header.pack_start(&spinner);
 
-    let refresh_button = gtk::Button::from_icon_name("view-refresh-symbolic");
-    refresh_button.set_tooltip_text(Some("Refresh outputs (F5)"));
-    header.pack_end(&refresh_button);
+    let about_button = gtk::Button::from_icon_name("help-about-symbolic");
+    about_button.set_tooltip_text(Some("About Displays"));
+    header.pack_end(&about_button);
 
     let apply_button = gtk::Button::with_label("Apply");
     apply_button.add_css_class("suggested-action");
@@ -482,7 +479,9 @@ pub fn build(application: &adw::Application, session: Session) -> AppWindow {
     mirror_label.add_css_class("dim-label");
     mirror_label.set_visible(false);
     preview_section.append(&mirror_label);
-    let preview_hint = gtk::Label::new(Some("Drag the external display to move it."));
+    let preview_hint = gtk::Label::new(Some(
+        "Drag the external display; it snaps to the closest edge.",
+    ));
     preview_hint.set_xalign(0.0);
     preview_hint.add_css_class("caption");
     preview_hint.add_css_class("dim-label");
@@ -539,7 +538,6 @@ pub fn build(application: &adw::Application, session: Session) -> AppWindow {
         window: window.clone(),
         toast,
         apply_button: apply_button.clone(),
-        refresh_button: refresh_button.clone(),
         spinner,
         presets_box,
         presets: RefCell::new(Vec::new()),
@@ -588,12 +586,19 @@ pub fn build(application: &adw::Application, session: Session) -> AppWindow {
         });
     }
     {
-        let model = model.clone();
-        let widgets = Rc::downgrade(&widgets);
-        refresh_button.connect_clicked(move |_| {
-            if let Some(widgets) = widgets.upgrade() {
-                request_refresh(&model, &widgets);
-            }
+        let parent = window.clone();
+        about_button.connect_clicked(move |_| {
+            let about = adw::AboutDialog::builder()
+                .application_name("Displays")
+                .application_icon(APP_ID)
+                .version(env!("CARGO_PKG_VERSION"))
+                .comments("Arrange displays and save the layout as a kanshi profile")
+                .website("https://github.com/grigio/kanshi-gtk4")
+                .issue_url("https://github.com/grigio/kanshi-gtk4/issues")
+                .developers(["grigio"])
+                .license_type(gtk::License::Gpl30Only)
+                .build();
+            about.present(Some(&parent));
         });
     }
 
@@ -674,13 +679,42 @@ fn section_label(text: &str) -> gtk::Label {
 struct DragState {
     name: String,
     origin: (i32, i32),
+    size: (i32, i32),
     scale: f64,
-    x_snap: Vec<i32>,
-    y_snap: Vec<i32>,
+    /// The display this one is magnetised to: `(x, y, width, height)` in
+    /// logical layout units. `None` when it is the only enabled display.
+    anchor: Option<(i32, i32, i32, i32)>,
 }
 
-/// Let the user drag the external display anywhere in the preview. The laptop
-/// panel stays at `0,0`; a manual move turns the plan into `Custom`.
+/// How close, in preview pixels, a dragged display must be to a flush position
+/// before it is pulled in.
+const PREVIEW_MAGNET_PX: f64 = 24.0;
+
+/// The enabled display a dragged one should snap to: the built-in panel when
+/// there is one, otherwise the first other enabled output.
+fn snap_anchor(
+    plan: &LayoutPlan,
+    internal: Option<&str>,
+    dragged: &str,
+) -> Option<(i32, i32, i32, i32)> {
+    let anchor = internal
+        .filter(|name| *name != dragged)
+        .and_then(|name| plan.outputs.get(name))
+        .filter(|output| output.enabled)
+        .or_else(|| {
+            plan.outputs
+                .iter()
+                .find(|(name, output)| name.as_str() != dragged && output.enabled)
+                .map(|(_, output)| output)
+        })?;
+    let (w, h) = anchor.logical_size();
+    Some((anchor.position.0, anchor.position.1, w, h))
+}
+
+/// Let the user drag the external display around the preview. The laptop panel
+/// stays where it is; a manual move turns the plan into `Custom`. While the
+/// pointer is near the other display the dragged rectangle is pulled flush
+/// against it, and on release it settles on the closest side.
 fn install_preview_drag(model: &Rc<RefCell<AppModel>>, widgets: &Rc<Widgets>) {
     let state: Rc<RefCell<Option<DragState>>> = Rc::new(RefCell::new(None));
     let drag = gtk::GestureDrag::new();
@@ -714,27 +748,12 @@ fn install_preview_drag(model: &Rc<RefCell<AppModel>>, widgets: &Rc<Widgets>) {
             let Some(output) = plan.outputs.get(&rect.name) else {
                 return;
             };
-            let mut x_snap = vec![0];
-            let mut y_snap = vec![0];
-            if let Some(internal) = app
-                .internal
-                .as_deref()
-                .and_then(|name| plan.outputs.get(name))
-            {
-                if internal.enabled {
-                    let (internal_w, internal_h) = internal.logical_size();
-                    let (external_w, external_h) = output.logical_size();
-                    x_snap.push(internal_w);
-                    x_snap.push(-external_w);
-                    y_snap.push(internal_h - external_h);
-                }
-            }
             *state.borrow_mut() = Some(DragState {
                 name: rect.name.clone(),
                 origin: output.position,
+                size: output.logical_size(),
                 scale: geometry.scale,
-                x_snap,
-                y_snap,
+                anchor: snap_anchor(plan, app.internal.as_deref(), &rect.name),
             });
             if let Some(widget) = gesture.widget() {
                 widget.set_cursor_from_name(Some("grabbing"));
@@ -753,23 +772,7 @@ fn install_preview_drag(model: &Rc<RefCell<AppModel>>, widgets: &Rc<Widgets>) {
             let Some(drag_state) = state.borrow().clone() else {
                 return;
             };
-            let mut position = (
-                drag_state.origin.0 + (dx / drag_state.scale).round() as i32,
-                drag_state.origin.1 + (dy / drag_state.scale).round() as i32,
-            );
-            // Snap to the laptop edges so the common arrangements are easy to
-            // hit without pixel-perfect dragging.
-            const SNAP: i32 = 14;
-            for target in &drag_state.x_snap {
-                if (position.0 - target).abs() <= SNAP {
-                    position.0 = *target;
-                }
-            }
-            for target in &drag_state.y_snap {
-                if (position.1 - target).abs() <= SNAP {
-                    position.1 = *target;
-                }
-            }
+            let position = drag_position(&drag_state, dx, dy, true);
             if model.borrow_mut().move_output(&drag_state.name, position) {
                 update_ui(&model, &widgets);
             }
@@ -778,10 +781,22 @@ fn install_preview_drag(model: &Rc<RefCell<AppModel>>, widgets: &Rc<Widgets>) {
 
     {
         let state = state.clone();
-        drag.connect_drag_end(move |gesture, _, _| {
-            state.borrow_mut().take();
+        let model = model.clone();
+        let widgets = Rc::downgrade(widgets);
+        drag.connect_drag_end(move |gesture, dx, dy| {
             if let Some(widget) = gesture.widget() {
                 widget.set_cursor_from_name(Some("grab"));
+            }
+            let Some(drag_state) = state.borrow_mut().take() else {
+                return;
+            };
+            // Always settle on the closest side of the other display, even if
+            // the drag ended far away: that is the magnetic auto-adjust.
+            let position = drag_position(&drag_state, dx, dy, false);
+            if model.borrow_mut().move_output(&drag_state.name, position) {
+                if let Some(widgets) = widgets.upgrade() {
+                    update_ui(&model, &widgets);
+                }
             }
         });
     }
@@ -815,6 +830,26 @@ fn install_preview_drag(model: &Rc<RefCell<AppModel>>, widgets: &Rc<Widgets>) {
     widgets.preview.area.add_controller(drag);
 }
 
+/// Where the dragged display goes for a pointer offset.
+///
+/// With `magnet` the flush position is used only when the pointer is near it;
+/// without it the display always settles on the closest side.
+fn drag_position(drag_state: &DragState, dx: f64, dy: f64, magnet: bool) -> (i32, i32) {
+    let free = (
+        drag_state.origin.0 + (dx / drag_state.scale).round() as i32,
+        drag_state.origin.1 + (dy / drag_state.scale).round() as i32,
+    );
+    let Some(anchor) = drag_state.anchor else {
+        return free;
+    };
+    if magnet {
+        let threshold = ((PREVIEW_MAGNET_PX / drag_state.scale).round() as i32).max(1);
+        preview::magnetic_position(free, drag_state.size, anchor, threshold)
+    } else {
+        preview::nearest_side_position(free, drag_state.size, anchor)
+    }
+}
+
 fn update_ui(model: &Rc<RefCell<AppModel>>, widgets: &Rc<Widgets>) {
     // `sync` writes widget state, which can emit notifications that call back
     // into here. A nested pass would only redo work that is already in flight.
@@ -829,8 +864,26 @@ fn update_ui(model: &Rc<RefCell<AppModel>>, widgets: &Rc<Widgets>) {
     widgets.syncing.set(false);
 }
 
+/// Output names in display-list order: the built-in panel first, then the rest
+/// alphabetically. The panel keeps its controls at the top of the list no
+/// matter what its connector is called.
+fn display_order(mut names: Vec<String>, internal: Option<&str>) -> Vec<String> {
+    names.sort_by(|a, b| {
+        let a_internal = Some(a.as_str()) == internal;
+        let b_internal = Some(b.as_str()) == internal;
+        b_internal.cmp(&a_internal).then_with(|| a.cmp(b))
+    });
+    names
+}
+
 fn ensure_rows(model: &Rc<RefCell<AppModel>>, widgets: &Rc<Widgets>) {
-    let names: Vec<String> = model.borrow().plan.outputs.keys().cloned().collect();
+    let names = {
+        let current = model.borrow();
+        display_order(
+            current.plan.outputs.keys().cloned().collect(),
+            current.internal.as_deref(),
+        )
+    };
     if *widgets.row_names.borrow() == names {
         return;
     }
@@ -1468,5 +1521,39 @@ mod tests {
             name: "DP-1".to_string(),
             enabled: false,
         }));
+    }
+
+    #[test]
+    fn internal_display_is_listed_first() {
+        let names = vec![
+            "DP-1".to_string(),
+            "HDMI-A-1".to_string(),
+            "eDP-1".to_string(),
+        ];
+        assert_eq!(
+            display_order(names, Some("eDP-1")),
+            vec!["eDP-1", "DP-1", "HDMI-A-1"]
+        );
+        // Without a built-in panel the connector order stays alphabetical.
+        assert_eq!(
+            display_order(vec!["DP-2".to_string(), "DP-1".to_string()], None),
+            vec!["DP-1", "DP-2"]
+        );
+    }
+
+    #[test]
+    fn releasing_the_drag_settles_against_the_nearest_side() {
+        let state = DragState {
+            name: "DP-1".to_string(),
+            origin: (1560, 0),
+            size: (80, 60),
+            scale: 2.0,
+            anchor: Some((0, 0, 100, 100)),
+        };
+        // Dragged above the panel: the release snaps it on top, not at the
+        // arbitrary pointer position.
+        assert_eq!(drag_position(&state, -3120.0, -400.0, false), (0, -60));
+        // A tiny offset that is already flush stays where it is.
+        assert_eq!(drag_position(&state, 0.0, 0.0, false), (100, 0));
     }
 }

@@ -142,6 +142,66 @@ impl Geometry {
     }
 }
 
+/// Position of a `size` rectangle resting flush against the closest side of
+/// `anchor`, aligned to the nearest of its start, centre and end on the other
+/// axis.
+///
+/// `anchor` is `(x, y, width, height)` in logical layout units. The side is
+/// chosen from the relative position of the two centres, so dragging the
+/// external display past a corner switches it to the neighbouring side.
+pub fn nearest_side_position(
+    position: (i32, i32),
+    size: (i32, i32),
+    anchor: (i32, i32, i32, i32),
+) -> (i32, i32) {
+    let (px, py) = position;
+    let (w, h) = size;
+    let (ax, ay, aw, ah) = anchor;
+
+    let aligned_x = nearest_alignment(px, w, ax, aw);
+    let aligned_y = nearest_alignment(py, h, ay, ah);
+    let dx = (px + w / 2) - (ax + aw / 2);
+    let dy = (py + h / 2) - (ay + ah / 2);
+
+    if dx.abs() >= dy.abs() {
+        let x = if dx >= 0 { ax + aw } else { ax - w };
+        (x, aligned_y)
+    } else {
+        let y = if dy >= 0 { ay + ah } else { ay - h };
+        (aligned_x, y)
+    }
+}
+
+/// `nearest_side_position` applied only when the pointer is within `threshold`
+/// logical units of the flush position, which makes the preview feel magnetic
+/// without taking the display away from the pointer.
+pub fn magnetic_position(
+    position: (i32, i32),
+    size: (i32, i32),
+    anchor: (i32, i32, i32, i32),
+    threshold: i32,
+) -> (i32, i32) {
+    let snapped = nearest_side_position(position, size, anchor);
+    let close =
+        (position.0 - snapped.0).abs() <= threshold && (position.1 - snapped.1).abs() <= threshold;
+    if close {
+        snapped
+    } else {
+        position
+    }
+}
+
+fn nearest_alignment(start: i32, length: i32, anchor_start: i32, anchor_length: i32) -> i32 {
+    [
+        anchor_start,
+        anchor_start + (anchor_length - length) / 2,
+        anchor_start + anchor_length - length,
+    ]
+    .into_iter()
+    .min_by_key(|candidate| (start - candidate).abs())
+    .unwrap_or(anchor_start)
+}
+
 fn draw(
     area: &gtk::DrawingArea,
     cr: &gtk::cairo::Context,
@@ -368,5 +428,45 @@ mod tests {
             geometry.hit(200.0, 100.0).map(|rect| rect.name.as_str()),
             Some("eDP-1")
         );
+    }
+
+    /// The laptop panel is 100×100 at the origin.
+    const ANCHOR: (i32, i32, i32, i32) = (0, 0, 100, 100);
+    const SIZE: (i32, i32) = (80, 60);
+
+    #[test]
+    fn drag_snaps_to_the_nearest_side() {
+        // Past the right edge, vertically aligned with the panel's top.
+        assert_eq!(nearest_side_position((120, 10), SIZE, ANCHOR), (100, 0));
+        // Past the left edge.
+        assert_eq!(nearest_side_position((-40, 10), SIZE, ANCHOR), (-80, 0));
+        // Above.
+        assert_eq!(nearest_side_position((10, -40), SIZE, ANCHOR), (10, -60));
+        // Below.
+        assert_eq!(nearest_side_position((10, 130), SIZE, ANCHOR), (10, 100));
+    }
+
+    #[test]
+    fn snap_aligns_to_the_nearest_edge_or_centre() {
+        // Close to the bottom of the panel: bottom-aligned.
+        assert_eq!(
+            nearest_side_position((120, 45), SIZE, ANCHOR),
+            (100, 100 - 60)
+        );
+        // Roughly centred: centre-aligned.
+        assert_eq!(
+            nearest_side_position((120, 20), SIZE, ANCHOR),
+            (100, (100 - 60) / 2)
+        );
+        // Dragging below past the corner switches to the vertical side.
+        assert_eq!(nearest_side_position((120, 200), SIZE, ANCHOR), (20, 100));
+    }
+
+    #[test]
+    fn magnet_only_moves_a_nearby_display() {
+        // 6 units away from the flush position: pulled in.
+        assert_eq!(magnetic_position((106, 4), SIZE, ANCHOR, 12), (100, 0));
+        // Far away: left where the pointer put it.
+        assert_eq!(magnetic_position((400, 300), SIZE, ANCHOR, 12), (400, 300));
     }
 }

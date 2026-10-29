@@ -406,7 +406,10 @@ fn render_profile(name: &str, comment: &str, plan: &LayoutPlan, native_mirror: b
     }
     // Overlap alone is not a mirror on COSMIC: the profile has to ask the
     // compositor for one, or only the pointer is shared between the heads.
-    if native_mirror && plan.kind == LayoutKind::Mirror {
+    // Any plan whose heads sit at the same position is a mirror, including a
+    // manual arrangement that was never labelled as the Mirror preset: that is
+    // what makes a hotplug restore the same picture on both screens.
+    if native_mirror {
         if let Some((external, internal)) = mirror_pair(plan) {
             text.push_str(&format!(
                 "\texec {}\n",
@@ -420,6 +423,10 @@ fn render_profile(name: &str, comment: &str, plan: &LayoutPlan, native_mirror: b
 
 /// The (external, internal) pair a mirror plan shows. COSMIC mirrors the
 /// external head onto the built-in panel, which stays the source of truth.
+///
+/// Both heads must be enabled and at the same position, which is what a mirror
+/// means in the layout model; their logical sizes may differ because the
+/// external can cover only part of the panel.
 fn mirror_pair(plan: &LayoutPlan) -> Option<(String, String)> {
     let mut internal = None;
     let mut external = None;
@@ -428,12 +435,14 @@ fn mirror_pair(plan: &LayoutPlan) -> Option<(String, String)> {
             continue;
         }
         if is_internal_name(name) {
-            internal.get_or_insert_with(|| name.clone());
+            internal.get_or_insert_with(|| (name.clone(), output.position));
         } else {
-            external.get_or_insert_with(|| name.clone());
+            external.get_or_insert_with(|| (name.clone(), output.position));
         }
     }
-    Some((external?, internal?))
+    let (internal, internal_position) = internal?;
+    let (external, external_position) = external?;
+    (internal_position == external_position).then_some((external, internal))
 }
 
 /// Replace the managed block, or insert it at the top on first run. Text
@@ -673,6 +682,34 @@ mod tests {
         let extend = block[start..].split("\nprofile ").next().unwrap();
         assert!(extend.contains("scale 1.5"), "{extend}");
         assert!(!extend.contains("1.231"), "{extend}");
+    }
+
+    #[test]
+    fn manual_overlap_profiles_carry_the_native_mirror_command() {
+        let live = two_live();
+        let mut scales = BTreeMap::new();
+        scales.insert("eDP-1".to_string(), 2.0);
+        scales.insert("DP-1".to_string(), 1.5);
+        let mut plan = LayoutPlan::from_outputs(
+            &live,
+            LayoutKind::Extend,
+            Some("eDP-1"),
+            Some("DP-1"),
+            &scales,
+        );
+        // The external was dragged onto the panel, or the compositor restored
+        // that arrangement after a hotplug: a manual overlap is still a mirror.
+        plan.outputs.get_mut("DP-1").unwrap().position = (0, 0);
+        plan.kind = LayoutKind::Custom;
+        let current = CurrentLayout::new("eDP-1+DP-1".into(), plan, live, scales);
+
+        let block = generate_managed_block(&AppState::default(), Some(&current), true);
+        let start = block.find("profile auto-custom").expect("custom profile");
+        let custom = block[start..].split("\nprofile ").next().unwrap();
+        assert!(
+            custom.contains("\n\texec ") && custom.contains("mirror DP-1 eDP-1\n"),
+            "{custom}"
+        );
     }
 
     #[test]

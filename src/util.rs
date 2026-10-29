@@ -242,6 +242,12 @@ pub fn pid_alive(pid: i32) -> bool {
 }
 
 pub fn notify(summary: &str, body: &str) {
+    // Unit tests exercise the failure paths that notify the user (the
+    // watchdog restoring with a missing `wlr-randr`, for example). They must
+    // never pop a real desktop notification on the developer's session.
+    if cfg!(test) {
+        return;
+    }
     let program = program_from_env("KANSHI_GTK4_NOTIFY_SEND", "notify-send");
     if !command_exists(&program) {
         return;
