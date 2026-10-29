@@ -192,20 +192,24 @@ fn watchdog_restores_when_the_app_never_confirms() {
         apply::prepare_and_apply(session.apply_params(session.extend_plan(), 1)).expect("apply");
     assert!(session.output("DP-1").enabled);
 
-    // Simulate a crash: no Keep, no Revert, no marker.
+    // Simulate a crash: no Keep, no Revert, no marker. The watchdog writes
+    // the cancel marker as its last step, after the restore and its log line,
+    // so waiting for the marker waits for all of it. Watching the outputs
+    // instead races with the rest of the restore.
     let deadline = Instant::now() + Duration::from_secs(8);
-    while Instant::now() < deadline {
-        if !session.output("DP-1").enabled {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
+    while Instant::now() < deadline && watchdog::read_marker(&tx.dir).is_none() {
+        std::thread::sleep(Duration::from_millis(50));
     }
+    assert_eq!(
+        watchdog::read_marker(&tx.dir).as_deref(),
+        Some("cancel"),
+        "watchdog did not finish the restore"
+    );
     let dp = session.output("DP-1");
     assert!(!dp.enabled, "watchdog did not restore the layout");
 
     let log = fs::read_to_string(tx.dir.join("watchdog.log")).unwrap_or_default();
     assert!(log.contains("restored"), "{log}");
-    assert_eq!(watchdog::read_marker(&tx.dir).as_deref(), Some("cancel"));
 
     // Idempotent: cleaning up again is harmless.
     apply::revert(&tx).expect("second revert");
