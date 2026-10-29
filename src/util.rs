@@ -267,7 +267,34 @@ pub fn pid_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
     }
-    Path::new(&format!("/proc/{pid}")).exists()
+    if !Path::new(&format!("/proc/{pid}")).exists() {
+        return false;
+    }
+    // A zombie has already exited and only waits to be reaped by its parent.
+    // Orphans reparented to an init that does not reap (a container's PID 1,
+    // for example) stay visible in /proc forever, but they are dead: they
+    // cannot hold a transaction or a pipe open. When the state cannot be
+    // read, /proc still lists the process, so assume it is alive.
+    match process_state(pid) {
+        Some(state) => state != 'Z' && state != 'X',
+        None => true,
+    }
+}
+
+/// Process state from `/proc/<pid>/stat` (`R`, `S`, `Z`, …).
+fn process_state(pid: i32) -> Option<char> {
+    if pid <= 0 {
+        return None;
+    }
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The comm field is parenthesised and may contain spaces and `)`, so
+    // split after the last `)`.
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .next()?
+        .chars()
+        .next()
 }
 
 /// Kernel start time of a process, in clock ticks since boot (field 22 of
@@ -460,6 +487,26 @@ mod tests {
         // A different start time is a recycled PID, not this process.
         assert!(!pid_alive_since(pid, Some(start + 1)));
         assert!(!pid_alive_since(-1, None));
+    }
+
+    #[test]
+    fn a_zombie_is_not_alive() {
+        // A child that has exited but has not been reaped yet is a zombie:
+        // /proc/<pid> still exists, but nothing is running under that PID.
+        let mut child = Command::new("/bin/true").spawn().unwrap();
+        let pid = child.id() as i32;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_state(pid) != Some('Z') && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            process_state(pid),
+            Some('Z'),
+            "child did not become a zombie"
+        );
+        assert!(!pid_alive(pid));
+        assert!(!pid_alive_since(pid, None));
+        child.wait().unwrap();
     }
 
     #[test]
