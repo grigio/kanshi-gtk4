@@ -10,7 +10,7 @@
 # directory.
 
 pkgname=kanshi-gtk4
-pkgver=0.4.1
+pkgver=0.5.0
 pkgrel=1
 pkgdesc="Arrange displays on Wayland and save the layout as a kanshi profile"
 arch=('x86_64')
