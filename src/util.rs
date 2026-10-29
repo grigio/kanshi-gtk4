@@ -4,10 +4,12 @@ use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::unix::io::AsRawFd;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use wait_timeout::ChildExt;
 
 /// Result of running a subprocess with a timeout.
@@ -40,6 +42,10 @@ pub fn run_command(program: &Path, args: &[OsString], timeout: Duration) -> Resu
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Put the child in its own process group so a timeout can kill any
+        // helper it spawned as well. Without this a grandchild can keep the
+        // stdout pipe open and the reader threads block forever.
+        .process_group(0)
         .spawn()
         .with_context(|| format!("running {}", program.display()))?;
 
@@ -68,34 +74,28 @@ pub fn run_command(program: &Path, args: &[OsString], timeout: Duration) -> Resu
     let mut err = Vec::new();
     let status = match child.wait_timeout(timeout)? {
         Some(status) => {
-            // Give the reader threads a moment to drain the pipes.
-            let deadline = std::time::Instant::now() + Duration::from_millis(500);
-            let mut received = 0;
-            while received < 2 && std::time::Instant::now() < deadline {
-                if let Ok((tag, buf)) = rx.recv_timeout(Duration::from_millis(20)) {
-                    received += 1;
-                    if tag == 0 {
-                        out = buf;
-                    } else {
-                        err = buf;
-                    }
-                }
-            }
+            // The child has exited, so its write ends of both pipes are
+            // closed. Drain both readers instead of polling for a few
+            // hundred milliseconds: a slow but successful command must not
+            // lose its output. The grace period only guards against a
+            // grandchild that escaped the process group and still holds a
+            // pipe open.
+            drain_pipes(&rx, &mut out, &mut err, Duration::from_secs(5));
             Some(status)
         }
         None => {
+            // Kill the whole group: the direct child may have exited already
+            // while a helper still holds the pipes.
+            let pgid = -(child.id() as i32);
+            unsafe {
+                libc::kill(pgid, libc::SIGKILL);
+            }
             let _ = child.kill();
             let _ = child.wait();
+            drain_pipes(&rx, &mut out, &mut err, Duration::from_secs(2));
             None
         }
     };
-    while let Ok((tag, buf)) = rx.try_recv() {
-        if tag == 0 {
-            out = buf;
-        } else {
-            err = buf;
-        }
-    }
 
     match status {
         Some(status) => Ok(CmdOutput {
@@ -108,6 +108,35 @@ pub fn run_command(program: &Path, args: &[OsString], timeout: Duration) -> Resu
             program.display(),
             timeout.as_secs_f64().round() as u64
         ),
+    }
+}
+
+/// Wait for both pipe readers, up to `wait`. Output that arrives later is
+/// still collected by the detached reader thread, but cannot be returned.
+fn drain_pipes(
+    rx: &mpsc::Receiver<(u8, Vec<u8>)>,
+    out: &mut Vec<u8>,
+    err: &mut Vec<u8>,
+    wait: Duration,
+) {
+    let deadline = Instant::now() + wait;
+    let mut received = 0;
+    while received < 2 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok((tag, buf)) => {
+                received += 1;
+                if tag == 0 {
+                    *out = buf;
+                } else {
+                    *err = buf;
+                }
+            }
+            Err(_) => break,
+        }
     }
 }
 
@@ -241,9 +270,81 @@ pub fn pid_alive(pid: i32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
+/// Kernel start time of a process, in clock ticks since boot (field 22 of
+/// `/proc/<pid>/stat`). Together with the PID this identifies a process
+/// uniquely, so a recycled PID is not mistaken for the original one.
+pub fn process_start_time(pid: i32) -> Option<u64> {
+    if pid <= 0 {
+        return None;
+    }
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The comm field is parenthesised and may contain spaces and `)`, so
+    // split after the last `)`.
+    let rest = stat.rsplit_once(')')?.1;
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// True when `pid` is alive and, if a start time is known, still the same
+/// process that was recorded.
+pub fn pid_alive_since(pid: i32, start_time: Option<u64>) -> bool {
+    if !pid_alive(pid) {
+        return false;
+    }
+    match start_time {
+        Some(expected) => process_start_time(pid) == Some(expected),
+        None => true,
+    }
+}
+
+/// An exclusive `flock` on a transaction directory.
+///
+/// The UI and the detached watchdog both restore the same transaction. The
+/// lock serialises `finalize_keep`, `restore_transaction` and the watchdog's
+/// timeout path so a keep cannot be overtaken by a restore at the 10-second
+/// boundary. `flock` locks are released automatically when the file closes.
+pub struct DirLock {
+    file: File,
+}
+
+impl DirLock {
+    pub fn acquire(dir: &Path) -> Result<Self> {
+        // Never create the directory: a transaction that has already been
+        // kept or reverted must not be resurrected by a waiter that lost the
+        // race (the watchdog would then try to restore a snapshot that is
+        // already gone).
+        if !dir.is_dir() {
+            bail!("{} is not a transaction directory", dir.display());
+        }
+        let path = dir.join("lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        let fd = file.as_raw_fd();
+        let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("locking {}", path.display()));
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Drop for DirLock {
+    fn drop(&mut self) {
+        let fd = self.file.as_raw_fd();
+        unsafe {
+            libc::flock(fd, libc::LOCK_UN);
+        }
+    }
+}
+
 pub fn notify(summary: &str, body: &str) {
     // Unit tests exercise the failure paths that notify the user (the
-    // watchdog restoring with a missing `wlr-randr`, for example). They must
+    // watchdog restoring with a missing backend helper, for example). They must
     // never pop a real desktop notification on the developer's session.
     if cfg!(test) {
         return;
@@ -307,5 +408,78 @@ mod tests {
             Some("single".into())
         );
         assert_eq!(parse_current_profile(""), None);
+    }
+
+    #[test]
+    fn run_command_collects_large_output_without_polling_losses() {
+        let out = run_command(
+            Path::new("/bin/sh"),
+            &["-c".into(), "head -c 300000 /dev/zero | tr '\\0' x".into()],
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert!(out.success());
+        assert_eq!(out.stdout.len(), 300_000);
+    }
+
+    #[test]
+    fn run_command_times_out_and_kills_the_process_group() {
+        let dir = tempdir().unwrap();
+        let pid_file = dir.path().join("child.pid");
+        // The shell spawns a child that outlives it and keeps stdout open.
+        let script = format!("sleep 60 & echo $! > {}; wait", pid_file.to_string_lossy());
+        let started = Instant::now();
+        let err = run_command(
+            Path::new("/bin/sh"),
+            &["-c".into(), script.into()],
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("timed out"), "{err:#}");
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "took {:?}",
+            started.elapsed()
+        );
+        let pid: i32 = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // The grandchild shares the process group, so it must be gone too.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!pid_alive(pid), "helper {pid} survived the timeout");
+    }
+
+    #[test]
+    fn process_start_time_identifies_this_process() {
+        let pid = std::process::id() as i32;
+        let start = process_start_time(pid).expect("current process has a start time");
+        assert!(start > 0);
+        assert!(pid_alive_since(pid, Some(start)));
+        // A different start time is a recycled PID, not this process.
+        assert!(!pid_alive_since(pid, Some(start + 1)));
+        assert!(!pid_alive_since(-1, None));
+    }
+
+    #[test]
+    fn dir_lock_serialises_waiters() {
+        let dir = tempdir().unwrap();
+        let lock = DirLock::acquire(dir.path()).unwrap();
+        let path = dir.path().to_path_buf();
+        let (tx, rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let second = DirLock::acquire(&path).unwrap();
+            drop(second);
+            tx.send(()).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(150)).is_err(),
+            "the second lock was granted while the first was held"
+        );
+        drop(lock);
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("the waiter gets the lock after it is released");
+        waiter.join().unwrap();
     }
 }

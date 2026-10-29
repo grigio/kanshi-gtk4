@@ -1,9 +1,10 @@
-//! Outputs, modes and transforms as reported by `wlr-randr --json`.
+//! Outputs, modes and transforms as reported by the compositor
+//! (`zwlr_output_manager_v1`; also the shape of `wlr-randr --json`).
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Output transform, matching the values used by wlr-randr and kanshi.
+/// Output transform, matching the `wl_output` and kanshi values.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Transform {
     #[serde(rename = "normal")]
@@ -103,7 +104,7 @@ pub struct Mode {
     #[serde(default)]
     pub current: bool,
     /// True when this mode is not advertised by the panel and has to be set
-    /// with the compositor's custom-mode request (`wlr-randr --custom-mode`,
+    /// with the compositor's custom-mode request (`--custom-mode` in wlr-randr,
     /// kanshi `mode --custom`).
     #[serde(default)]
     pub custom: bool,
@@ -145,7 +146,7 @@ impl Mode {
     }
 
     /// Refresh formatted with up to three decimals, as accepted by
-    /// wlr-randr and kanshi: `120`, `59.951`.
+    /// kanshi: `120`, `59.951`.
     pub fn refresh_string(&self) -> String {
         let hz = self.refresh_hz();
         let rounded = (hz * 1000.0).round() / 1000.0;
@@ -182,7 +183,7 @@ impl Mode {
         let height: u32 = h.parse().ok()?;
         let refresh_mhz = match refresh {
             Some(r) => (r.parse::<f64>().ok()? * 1000.0).round() as u32,
-            // Kanshi accepts a mode without a rate; wlr-randr does too.
+            // Kanshi accepts a mode without a rate; the protocol does too.
             None => 0,
         };
         Some(Self {
@@ -221,7 +222,7 @@ impl fmt::Display for Mode {
     }
 }
 
-/// A connected head as reported by `wlr-randr --json`.
+/// A connected head as reported by the compositor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Output {
     pub name: String,
@@ -247,6 +248,48 @@ pub struct Output {
 impl Output {
     pub fn is_internal(&self) -> bool {
         is_internal_name(&self.name)
+    }
+
+    /// Stable identity of the physical head, independent of the connector
+    /// name. Built from the EDID make/model/serial the compositor reports, so
+    /// remembered settings survive a dock or reboot that renames `DP-1` to
+    /// `DP-3`.
+    ///
+    /// Returns `None` when the compositor reports no model and no serial: a
+    /// make alone is not enough to tell two monitors apart.
+    pub fn identity(&self) -> Option<String> {
+        fn clean(value: Option<&str>) -> Option<String> {
+            let value = value?.trim();
+            if value.is_empty() {
+                return None;
+            }
+            let cleaned: String = value
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '-'
+                    }
+                })
+                .collect();
+            let cleaned = cleaned.trim_matches('-').to_string();
+            (!cleaned.is_empty()).then_some(cleaned)
+        }
+
+        let make = clean(self.make.as_deref());
+        let model = clean(self.model.as_deref());
+        let serial = clean(self.serial.as_deref());
+        if model.is_none() && serial.is_none() {
+            return None;
+        }
+        Some(
+            [make, model, serial]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("|"),
+        )
     }
 
     pub fn current_mode(&self) -> Option<&Mode> {
@@ -279,7 +322,7 @@ impl Output {
 /// Lower resolutions to offer for an output that exposes a single real size.
 ///
 /// Many laptop panels advertise only their native mode. Compositors still
-/// accept a custom mode at a lower size (wlr-randr `--custom-mode`, kanshi
+/// accept a custom mode at a lower size (`--custom-mode` in wlr-randr, kanshi
 /// `mode --custom`), so add a handful of sizes that keep the panel's aspect
 /// ratio and every refresh rate of the native mode.
 ///
@@ -380,6 +423,35 @@ mod tests {
             Mode::new(1920, 1200, 60_000).logical_size(1.5, Transform::Normal),
             (1280, 800)
         );
+    }
+
+    #[test]
+    fn identity_comes_from_edid_not_the_connector_name() {
+        let mut first = output_with_modes("DP-1", vec![Mode::new(1920, 1080, 60_000)]);
+        first.make = Some("Dell Inc.".into());
+        first.model = Some("DELL U2720Q".into());
+        first.serial = Some("ABC123".into());
+        assert_eq!(
+            first.identity().as_deref(),
+            Some("dell-inc|dell-u2720q|abc123")
+        );
+
+        // The same physical head under another connector name keeps its id.
+        let mut renamed = first.clone();
+        renamed.name = "DP-7".into();
+        assert_eq!(first.identity(), renamed.identity());
+
+        // Make alone is not enough to identify a head, and an empty identity
+        // is no identity at all.
+        let mut make_only = first.clone();
+        make_only.model = None;
+        make_only.serial = None;
+        assert_eq!(make_only.identity(), None);
+        let mut empty = first;
+        empty.make = Some("  ".into());
+        empty.model = Some("".into());
+        empty.serial = None;
+        assert_eq!(empty.identity(), None);
     }
 
     #[test]

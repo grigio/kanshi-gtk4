@@ -3,8 +3,7 @@
 use anyhow::Result;
 use std::collections::BTreeMap;
 
-use crate::backend::wlr_randr::WlrRandrBackend;
-use crate::backend::{BackendInfo, OutputBackend};
+use crate::backend::{self, BackendInfo};
 use crate::config::{AppState, Paths};
 use crate::kanshi::ctl::{KanshiClient, KanshiInfo};
 use crate::model::layout::{detect_layout, set_key, LayoutKind, LayoutPlan};
@@ -26,7 +25,7 @@ pub struct Session {
 
 impl Session {
     pub fn load(paths: Paths) -> Result<Self> {
-        let backend = WlrRandrBackend::new();
+        let backend = backend::create();
         let backend_info = backend.detect()?;
         let outputs = if backend_info.supported {
             backend.list()?
@@ -35,7 +34,6 @@ impl Session {
         };
 
         let mut state = AppState::load(&paths.state_path)?;
-        state.seed_internal_single(&outputs);
 
         let internal = outputs
             .iter()
@@ -70,6 +68,16 @@ impl Session {
             set_key(&names, internal.as_deref())
         };
 
+        // Connector names are not stable across docks and reboots. When the
+        // same physical heads come back under other names, adopt the set
+        // remembered for them so per-output settings survive the rename.
+        if !outputs.is_empty() {
+            state.adopt_renamed_set(&key, &outputs);
+        }
+        // Seed after adoption: if the panel is the whole live set and its
+        // connector was renamed, the adopted set already owns that key.
+        state.seed_internal_single(&outputs);
+
         let mut desktop_scales = state.remembered_desktop_scales(&key);
         for output in &outputs {
             desktop_scales
@@ -87,7 +95,7 @@ impl Session {
             external.as_deref(),
             &live_scales,
         );
-        // wlr-randr lists a custom mode like any other mode while it is
+        // The compositor lists a custom mode like any other mode while it is
         // active, so recover the "custom" flag from the saved state. Without
         // this, regenerating the kanshi config after a reboot would drop
         // `mode --custom` and fail on the next login.
@@ -104,6 +112,7 @@ impl Session {
             state.record_set(
                 &key,
                 &plan,
+                &outputs,
                 internal.as_deref(),
                 external.as_deref(),
                 &desktop_scales,

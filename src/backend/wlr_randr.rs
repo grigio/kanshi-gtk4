@@ -190,8 +190,8 @@ impl OutputBackend for WlrRandrBackend {
             && std::env::var_os("WAYLAND_SOCKET").is_none()
         {
             return Ok(BackendInfo::unsupported(
-                "No Wayland session detected. This app supports labwc and niri, which \
-                 expose zwlr_output_manager_v1.",
+                "No Wayland session detected. This app needs a Wayland compositor that \
+                 implements zwlr_output_manager_v1 (labwc, sway, niri, Hyprland, …).",
             ));
         }
 
@@ -213,26 +213,19 @@ impl OutputBackend for WlrRandrBackend {
                     if !found {
                         return Ok(BackendInfo::unsupported(
                             "This compositor does not support zwlr_output_manager_v1. \
-                             The app supports labwc and niri; other compositors may work \
-                             but are untested. GNOME, KDE and Hyprland are not supported.",
+                             The protocol comes from wlroots: labwc, sway, niri and \
+                             Hyprland provide it. GNOME (Mutter) and KDE (KWin) do not, \
+                             so this app cannot change outputs there.",
                         ));
                     }
-                    return Ok(BackendInfo {
-                        supported: true,
-                        reason: None,
-                        protocol_version: version,
-                    });
+                    return Ok(BackendInfo::supported(version));
                 }
             }
         }
 
         // wayland-info missing or failed: fall back to a real wlr-randr call.
         match self.list() {
-            Ok(_) => Ok(BackendInfo {
-                supported: true,
-                reason: None,
-                protocol_version: version,
-            }),
+            Ok(_) => Ok(BackendInfo::supported(version)),
             Err(err) => Ok(BackendInfo::unsupported(format!(
                 "The compositor did not answer wlr-randr: {err:#}"
             ))),

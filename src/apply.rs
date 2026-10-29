@@ -5,9 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::backend;
 use crate::backend::cosmic;
-use crate::backend::wlr_randr::WlrRandrBackend;
-use crate::backend::OutputBackend;
 use crate::config::{AppState, Paths};
 use crate::kanshi::config::{
     generate_managed_block, merge_managed_block, write_config, write_keep_backup, CurrentLayout,
@@ -187,8 +186,58 @@ fn mirror_outputs(params: &ApplyParams) -> Result<()> {
         .with_context(|| format!("mirroring {external} onto {internal}"))
 }
 
+/// Break the native COSMIC mirrors that `plan` does not want.
+///
+/// Without this, a head that stays where it is keeps mirroring the old source.
+/// "External only" is the worst case: the panel it mirrors is turned off, so
+/// the external shows a grey picture.
+fn break_unwanted_mirrors(live: &BTreeMap<String, String>, plan: &LayoutPlan) -> Result<()> {
+    for (output, from) in stale_mirrors(live, plan) {
+        let Some(planned) = plan.outputs.get(&output) else {
+            continue;
+        };
+        cosmic::break_mirror(&output, planned)
+            .with_context(|| format!("ending the mirror of {output} on {from}"))?;
+    }
+    Ok(())
+}
+
+/// Mirrors that exist now but that `plan` does not want.
+fn stale_mirrors(live: &BTreeMap<String, String>, plan: &LayoutPlan) -> Vec<(String, String)> {
+    let wanted = cosmic::mirror_pair(plan);
+    let mut stale = Vec::new();
+    for (output, from) in live {
+        let keeps = wanted
+            .as_ref()
+            .is_some_and(|(external, internal)| external == output && internal == from);
+        // A head the plan turns off is off anyway: no need to wake it up just
+        // to unmirror it.
+        let planned_enabled = plan
+            .outputs
+            .get(output)
+            .is_some_and(|output| output.enabled);
+        if !keeps && planned_enabled {
+            stale.push((output.clone(), from.clone()));
+        }
+    }
+    stale
+}
+
+/// The native mirrors that exist now, recorded so a revert can put them back.
+///
+/// Read once per apply: `cosmic-randr list` is a subprocess, and the same map
+/// decides both which stale mirrors to break and what a revert restores.
+fn snapshot_mirrors() -> Option<BTreeMap<String, String>> {
+    if !cosmic::native_mirror_supported() {
+        return None;
+    }
+    // Failing to list mirrors must not block an apply: nothing about the
+    // layout needs the map unless a mirror actually exists.
+    cosmic::mirrors().ok()
+}
+
 pub fn prepare_and_apply(mut params: ApplyParams) -> Result<PreparedTx> {
-    let backend = WlrRandrBackend::new();
+    let backend = backend::create();
     let kanshi = KanshiClient::new();
     let root = params.paths.transaction_root();
     fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
@@ -215,6 +264,9 @@ pub fn prepare_and_apply(mut params: ApplyParams) -> Result<PreparedTx> {
     // would otherwise shift a negative coordinate and the verification below
     // would reject a layout the compositor had just accepted.
     params.plan.normalize_origin();
+    // Validate before any side effect: a rejected configuration must not
+    // create a transaction, spawn a watchdog or touch the config.
+    backend.dry_run(&params.plan)?;
 
     let info = kanshi.detect(&params.paths.config_path);
     let engine = if info.engine_usable {
@@ -243,6 +295,7 @@ pub fn prepare_and_apply(mut params: ApplyParams) -> Result<PreparedTx> {
     state.record_set(
         &params.set_key,
         &params.plan,
+        &live,
         params.internal.as_deref(),
         params.external.as_deref(),
         &params.desktop_scales,
@@ -267,7 +320,7 @@ pub fn prepare_and_apply(mut params: ApplyParams) -> Result<PreparedTx> {
     }
     let _ = util::atomic_write(&dir.join("state.after"), &state_after);
 
-    let snapshot = Snapshot::new(
+    let mut snapshot = Snapshot::new(
         engine,
         info.running,
         config_path.to_string_lossy().into_owned(),
@@ -278,6 +331,11 @@ pub fn prepare_and_apply(mut params: ApplyParams) -> Result<PreparedTx> {
         0,
         &live,
     );
+    let mirrors_before = snapshot_mirrors();
+    snapshot.mirrored = mirrors_before
+        .clone()
+        .map(|mirrors| mirrors.into_iter().collect())
+        .unwrap_or_default();
     util::atomic_write(
         &dir.join("state.json"),
         &serde_json::to_vec_pretty(&snapshot)?,
@@ -291,8 +349,7 @@ pub fn prepare_and_apply(mut params: ApplyParams) -> Result<PreparedTx> {
             return Err(err);
         }
     };
-    let mut snapshot = snapshot;
-    snapshot.watchdog_pid = watchdog_pid;
+    snapshot.record_watchdog(watchdog_pid);
     util::atomic_write(
         &dir.join("state.json"),
         &serde_json::to_vec_pretty(&snapshot)?,
@@ -300,26 +357,31 @@ pub fn prepare_and_apply(mut params: ApplyParams) -> Result<PreparedTx> {
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(u64::from(params.timeout_secs));
 
-    let apply_result = match engine {
-        EngineKind::Kanshi => (|| -> Result<()> {
-            backend.dry_run(&params.plan)?;
-            // Write the config first: kanshi may see the output changes below
-            // and re-apply whatever the file says, which must already be the
-            // layout the user picked.
-            write_config(&config_path, &candidate_config, config_before.as_deref())?;
-            // Drive the compositor directly instead of letting kanshi do it.
-            // kanshi 1.9 on labwc drops the "enabled" bit for a head that is
-            // currently off, so "Extend" would leave the laptop panel dark.
-            backend.apply(&params.plan)?;
-            // Now kanshi only has to load the same layout into memory.
-            reload_kanshi(&kanshi)?;
-            Ok(())
-        })(),
-        EngineKind::Wlr => (|| -> Result<()> {
-            backend.dry_run(&params.plan)?;
-            backend.apply(&params.plan)
-        })(),
-    };
+    let apply_result = (|| -> Result<()> {
+        // COSMIC keeps a native mirror until the mirrored head is
+        // reconfigured, and a mirror of a disabled head renders grey: break
+        // every mirror this plan no longer wants before touching the outputs.
+        if let Some(live) = &mirrors_before {
+            break_unwanted_mirrors(live, &params.plan)?;
+        }
+        match engine {
+            EngineKind::Kanshi => (|| -> Result<()> {
+                // Write the config first: kanshi may see the output changes
+                // below and re-apply whatever the file says, which must
+                // already be the layout the user picked.
+                write_config(&config_path, &candidate_config, config_before.as_deref())?;
+                // Drive the compositor directly instead of letting kanshi do
+                // it. kanshi 1.9 on labwc drops the "enabled" bit for a head
+                // that is currently off, so "Extend" would leave the laptop
+                // panel dark.
+                backend.apply(&params.plan)?;
+                // Now kanshi only has to load the same layout into memory.
+                reload_kanshi(&kanshi)?;
+                Ok(())
+            })(),
+            EngineKind::Wlr => backend.apply(&params.plan),
+        }
+    })();
 
     if let Err(err) = apply_result {
         // Restore config/outputs; a failed apply must leave the system as it
@@ -377,6 +439,13 @@ pub fn prepare_and_apply(mut params: ApplyParams) -> Result<PreparedTx> {
 /// watchdog restore everything.
 pub fn finalize_keep(tx: &PreparedTx) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
+    if !tx.dir.is_dir() {
+        bail!("the transaction has already finished; the layout was not saved");
+    }
+    // Hold the lock for the whole keep. Otherwise the watchdog can time out
+    // between the last write and the marker and restore the old layout after
+    // the user already confirmed the new one.
+    let _lock = util::DirLock::acquire(&tx.dir)?;
     let result = (|| -> Result<()> {
         // 1. App state, with a .bak of the previous bytes.
         util::write_backup(&tx.state_path, &tx.state_path.with_extension("json.bak"))?;
@@ -416,8 +485,9 @@ pub fn finalize_keep(tx: &PreparedTx) -> Result<Vec<String>> {
     })();
 
     if let Err(err) = result {
-        // Keep the state, config and compositor consistent.
-        let _ = watchdog::restore_transaction(&tx.dir);
+        // Keep the state, config and compositor consistent. We already hold
+        // the lock, so use the unlocked restore to avoid deadlocking.
+        let _ = watchdog::restore_transaction_locked(&tx.dir);
         watchdog::cancel_and_cleanup(&tx.dir);
         return Err(err.context("could not save the layout; the previous layout was restored"));
     }
@@ -436,7 +506,7 @@ pub fn finalize_keep(tx: &PreparedTx) -> Result<Vec<String>> {
                 .to_string(),
         );
     }
-    if let Ok(live) = WlrRandrBackend::new().list() {
+    if let Ok(live) = backend::create().list() {
         if !tx.plan.matches_live_relaxed(&live) {
             warnings.push("The display state changed after saving.".to_string());
         }
@@ -465,5 +535,63 @@ pub fn persistence_hint(tx: &PreparedTx) -> Option<String> {
         Some("The kanshi config is not writable; the layout will not be saved.".into())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::layout::{LayoutKind, OutputPlan};
+    use crate::model::output::{Mode, Transform};
+
+    fn plan_with(edp: (bool, (i32, i32)), hdmi: (bool, (i32, i32))) -> LayoutPlan {
+        let output = |(enabled, position): (bool, (i32, i32))| OutputPlan {
+            enabled,
+            mode: Mode::new(1920, 1200, 59_950),
+            position,
+            scale: 1.0,
+            transform: Transform::Normal,
+            adaptive_sync: false,
+        };
+        let mut outputs = BTreeMap::new();
+        outputs.insert("eDP-1".to_string(), output(edp));
+        outputs.insert("HDMI-A-1".to_string(), output(hdmi));
+        LayoutPlan {
+            kind: LayoutKind::Custom,
+            outputs,
+        }
+    }
+
+    fn live_mirror() -> BTreeMap<String, String> {
+        BTreeMap::from([("HDMI-A-1".to_string(), "eDP-1".to_string())])
+    }
+
+    #[test]
+    fn a_wanted_mirror_is_left_alone() {
+        let plan = plan_with((true, (0, 0)), (true, (0, 0)));
+        assert!(stale_mirrors(&live_mirror(), &plan).is_empty());
+    }
+
+    #[test]
+    fn external_only_breaks_the_mirror_of_the_disabled_panel() {
+        // The bug behind the grey screen: HDMI keeps mirroring eDP while eDP
+        // is turned off.
+        let plan = plan_with((false, (0, 0)), (true, (0, 0)));
+        assert_eq!(
+            stale_mirrors(&live_mirror(), &plan),
+            vec![("HDMI-A-1".to_string(), "eDP-1".to_string())]
+        );
+    }
+
+    #[test]
+    fn moving_a_head_breaks_its_mirror() {
+        let plan = plan_with((true, (0, 0)), (true, (1920, 0)));
+        assert_eq!(stale_mirrors(&live_mirror(), &plan).len(), 1);
+    }
+
+    #[test]
+    fn a_head_that_gets_turned_off_needs_no_unmirror() {
+        let plan = plan_with((true, (0, 0)), (false, (0, 0)));
+        assert!(stale_mirrors(&live_mirror(), &plan).is_empty());
     }
 }

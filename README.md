@@ -34,12 +34,16 @@ writes it to `~/.config/kanshi/config`, so it survives reboot and hotplug.
   below). Other compositors exposing the same protocol may work but are
   untested. **GNOME and KDE are not supported** (they do not expose the
   protocol).
-- [`wlr-randr`](https://gitlab.freedesktop.org/emersion/wlr-randr) — required.
 - [kanshi](https://gitlab.freedesktop.org/emersion/kanshi) — optional, needed
   to persist the layout across reboot and hotplug.
+- `wlr-randr` — **no longer required**. The app speaks
+  `zwlr_output_manager_v1` natively through `wayland-client`; the old
+  shell-out backend is only kept as an opt-in debugging fallback
+  (`KANSHI_GTK4_BACKEND=wlr-randr`). COSMIC mirroring still uses
+  `cosmic-randr` when available.
 
 ```sh
-sudo pacman -S wlr-randr kanshi
+sudo pacman -S kanshi
 ```
 
 ### Compositor support
@@ -60,8 +64,8 @@ sudo pacman -S wlr-randr kanshi
 > **sway users:** sway only gained `zwlr_output_manager_v1` (v4) in **1.11**, so
 > the app sees no outputs on older sway. Debian 13 (trixie) ships sway 1.10.1,
 > so on stock trixie + sway the app finds nothing to arrange. Check with
-> `wlr-randr` (empty output means the protocol is missing) and use sway 1.11+
-> or a different compositor.
+> `wayland-info | grep zwlr_output_manager` (no output means the protocol is
+> missing) and use sway 1.11+ or a different compositor.
 
 > **COSMIC users:** `cosmic-comp-traffic` 1.11.0 and later works: all four
 > presets, dragging, scaling and the managed kanshi block were verified on it.
@@ -95,9 +99,10 @@ sudo pacman -S wlr-randr kanshi
 
 Tested on labwc 0.20.2, niri and cosmic-comp-traffic 1.11.0 with a Xiaomi Book
 Pro 14 (eDP-1, 3120×2080) and a Dell E248WFP (1920×1200). Connector names,
-modes, refresh rates and scales are read from `wlr-randr` at runtime: nothing
-about a particular display is hardcoded, and each output has its own resolution
-and refresh picker.
+modes, refresh rates and scales are read from the compositor at runtime:
+nothing about a particular display is hardcoded, and each output has its own
+resolution and refresh picker. EDID make/model/serial are used as a stable
+identity, so layouts survive a dock or reboot that renames a connector.
 
 ## Build and run
 
@@ -261,8 +266,8 @@ The app has two apply engines, selected at transaction start:
 
 | Engine | When | Apply | Revert |
 |---|---|---|---|
-| kanshi | `kanshictl status` succeeds, the daemon uses the managed config path, and the file is writable | write provisional config, apply with `wlr-randr`, `kanshictl reload` | restore the previous config bytes and reload |
-| wlr-randr | kanshi is missing or stopped, uses a custom `-c` path, or the config is not writable | `wlr-randr --dryrun`, then apply | restore the output snapshot |
+| kanshi | `kanshictl status` succeeds, the daemon uses the managed config path, and the file is writable | write provisional config, apply through the native protocol, `kanshictl reload` | restore the previous config bytes and reload |
+| native | kanshi is missing or stopped, uses a custom `-c` path, or the config is not writable | protocol `test`, then `apply` | restore the output snapshot |
 
 The app applies the layout itself and then hands the same profile to kanshi.
 This is required because kanshi 1.9 on labwc ignores the enabled bit for a
@@ -287,8 +292,8 @@ restores the previous config and output snapshot, logs the result and sends a
 `notify-send` notification if available. The restore is idempotent, so it can
 race with the UI's own revert safely.
 
-On Keep, app state is written first, then the config (for the wlr-randr
-engine), then the `keep` marker last. If saving fails before the marker, the
+On Keep, app state is written first, then the config (when the direct engine
+wrote one), then the `keep` marker last. If saving fails before the marker, the
 old state, config and layout are restored.
 
 A new Apply first rolls back any older pending transaction. If the app and
@@ -362,8 +367,8 @@ current set first.
 and follow symlinks to the real target. Before writing, the previous config is
 saved as `config.pre-kanshi-gtk4.<timestamp>.bak`; after each successful Keep
 the app updates `config.kanshi-gtk4.bak`. It never touches user files such as
-`config.bak`. If the config is not writable, the app falls back to the
-wlr-randr engine and says so.
+`config.bak`. If the config is not writable, the app falls back to applying
+through the native protocol without saving and says so.
 
 ### State file
 
@@ -428,11 +433,17 @@ current panel.
   dialog may not be visible. The watchdog still reverts after 10 seconds.
 - Unplugging a display during the countdown aborts the transaction and
   restores the previous layout for the outputs that are still present.
-- Output names are connector names. If a monitor appears under a different
-  name after a reboot or through a dock, the profile may not match; EDID
-  aliases are future work.
-- `wlr-randr` is a runtime dependency; a native protocol backend is future
-  work.
+- Output names are connector names. Remembered per-output settings are
+  matched by EDID identity, so a rename through a dock or reboot reuses them;
+  the generated kanshi profile still uses the current connector names, as
+  kanshi matches on those.
+- `wlr-randr` is not needed at runtime. It remains as an opt-in fallback
+  (`KANSHI_GTK4_BACKEND=wlr-randr`) for debugging and for the integration
+  tests.
+- HDR and bit-depth are not configurable: `zwlr_output_manager_v1` v4 (the
+  current wlroots baseline) does not expose them, and no stable
+  `ext-output-management` protocol exists yet. The app will keep flagging
+  adaptive sync (VRR) only.
 - Hyprland support is partial: outputs can be read, arranged and saved, but
   Hyprland re-applies its own `monitor=` / `hl.monitor()` rules on config
   reload, which can override the applied layout, and rotation set through the
@@ -440,10 +451,11 @@ current panel.
 
 ## Troubleshooting
 
-- **No displays detected** — `wlr-randr --json` failed. Check that the
-  compositor exposes `zwlr_output_manager_v1`:
-  `wayland-info | grep zwlr_output_manager`. Make sure `wlr-randr` is
-  installed.
+- **No displays detected** — the native protocol backend could not read the
+  outputs. Check that the compositor exposes `zwlr_output_manager_v1`:
+  `wayland-info | grep zwlr_output_manager`. No extra program has to be
+  installed; `KANSHI_GTK4_BACKEND=wlr-randr kanshi-gtk4 --verbose` uses the
+  legacy shell-out backend if you want to compare.
 - **This compositor does not support output management** — GNOME and KDE do
   not expose the protocol. Use labwc, niri, sway 1.11+, COSMIC or Hyprland
   0.52.1+.
@@ -453,8 +465,9 @@ current panel.
   instead of in the app.
 - **kanshi not running** — the layout still applies but will not re-apply at
   login. Start kanshi or add it to autostart.
-- **Config not writable** — the app falls back to the wlr-randr engine and
-  shows a warning. Fix permissions or point `--config` at a writable file.
+- **Config not writable** — the app still applies the layout through the
+  native protocol and shows a warning. Fix permissions or point `--config` at
+  a writable file.
 - **Stale transaction** — on launch, choose **Restore layout**, or run
   `kanshi-gtk4 --revert "$XDG_RUNTIME_DIR"/kanshi-gtk4/pending-<id>`.
 - **Backups** — `config.pre-kanshi-gtk4.<timestamp>.bak` and
@@ -471,17 +484,27 @@ cargo test
 ```
 
 The unit tests cover geometry, validation, config generation, managed-block
-merging and the watchdog. The integration tests in `tests/integration.rs` run
-the real apply/keep/revert state machine against `tests/mock-wlr-randr` and
-`tests/mock-kanshictl`, with no compositor needed. They exercise the kanshi
-and wlr-randr engines, reload failure, dry-run failure, hotplug cancellation,
-verification mismatch and watchdog timeout.
+merging, EDID identity and the watchdog. The integration tests in
+`tests/integration.rs` run the real apply/keep/revert state machine against
+`tests/mock-wlr-randr` and `tests/mock-kanshictl`, with no compositor needed;
+they select the legacy backend with `KANSHI_GTK4_BACKEND=wlr-randr`. They
+exercise the kanshi and direct engines, reload failure, dry-run failure,
+hotplug cancellation, verification mismatch and watchdog timeout. The native
+protocol backend has an ignored live test:
+
+```sh
+cargo test -- --ignored native_dry_run
+```
+
+It calls the protocol's `test` request, which validates a configuration
+without applying it.
 
 Environment overrides used by the tests (and useful for debugging):
 
 | Variable | Meaning |
 |---|---|
-| `KANSHI_GTK4_WLR_RANDR` | path to `wlr-randr` |
+| `KANSHI_GTK4_BACKEND` | `native` (default) or `wlr-randr` (legacy fallback) |
+| `KANSHI_GTK4_WLR_RANDR` | path to `wlr-randr` (legacy backend only) |
 | `KANSHI_GTK4_KANSHICTL` | path to `kanshictl` |
 | `KANSHI_GTK4_WAYLAND_INFO` | path to `wayland-info` |
 | `KANSHI_GTK4_KANSHI_CONFIG` | kanshi config path |
@@ -502,7 +525,8 @@ or a second virtual output.
 
 - [kanshi](https://gitlab.freedesktop.org/emersion/kanshi) — `man kanshi`,
   `man 5 kanshi`, `man kanshictl`
-- [wlr-randr](https://gitlab.freedesktop.org/emersion/wlr-randr)
+- [wlr-randr](https://gitlab.freedesktop.org/emersion/wlr-randr) — legacy
+  backend and protocol reference
 - [`wlr-output-management-unstable-v1` protocol](https://gitlab.freedesktop.org/wlroots/wlr-protocols)
 - [Compositor support matrix](https://wayland.app/protocols/wlr-output-management-unstable-v1)
 - [gtk4-rs](https://gtk-rs.org/gtk4-rs)

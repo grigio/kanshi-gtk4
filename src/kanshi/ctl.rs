@@ -9,6 +9,17 @@ use crate::util;
 
 pub const ENV_KANSHICTL: &str = "KANSHI_GTK4_KANSHICTL";
 
+/// The config kanshi reads when it is started without `-c`/`--config`.
+pub fn default_config_path() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let xdg_config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    xdg_config.join("kanshi/config")
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct KanshiInfo {
     pub installed: bool,
@@ -26,7 +37,7 @@ impl KanshiInfo {
         if self.engine_usable {
             "kanshi"
         } else {
-            "wlr-randr"
+            "native"
         }
     }
 
@@ -114,22 +125,35 @@ impl KanshiClient {
         }
 
         info.daemon_pid = find_daemon_pid();
-        if let Some(pid) = info.daemon_pid {
-            info.custom_config = read_config_arg(pid);
-        }
-        if let Some(custom) = &info.custom_config {
-            if !same_path(custom, managed_config) {
-                info.note = Some(format!(
-                    "kanshi uses a custom config ({}), applying through wlr-randr",
-                    custom.display()
-                ));
-            } else {
-                info.custom_config = None;
+        if info.running {
+            // kanshi re-reads its *effective* config on `kanshictl reload`.
+            // When the daemon has no `-c`, that is the default path; when the
+            // app was pointed at another file (`--config`, env override), the
+            // write would be silently ignored by the running daemon.
+            //
+            // Only decide this when the daemon process was actually found: if
+            // we cannot inspect its command line we have no evidence that the
+            // effective path differs, and disabling the kanshi engine would
+            // break a working setup (or a test double).
+            if let Some(pid) = info.daemon_pid {
+                // `effective_config` is `None` only when `/proc/<pid>/cmdline`
+                // cannot be read: then we do not know which file kanshi uses
+                // and must not disable a working setup on a guess.
+                if let Some(effective) = effective_config(pid) {
+                    if !same_path(&effective, managed_config) {
+                        info.custom_config = Some(effective.clone());
+                        info.note = Some(format!(
+                            "kanshi reads {} but the app writes {}; applying through the native protocol",
+                            effective.display(),
+                            managed_config.display()
+                        ));
+                    }
+                }
             }
         }
         if info.running && !info.config_writable {
             info.note = Some(format!(
-                "{} is not writable, applying through wlr-randr",
+                "{} is not writable, applying through the native protocol",
                 managed_config.display()
             ));
         }
@@ -151,7 +175,14 @@ fn same_path(a: &Path, b: &Path) -> bool {
 
 /// Find the kanshi daemon by scanning `/proc`. More reliable than parsing
 /// pgrep output, and needs no extra dependency.
+///
+/// Only processes of the current user that share our `XDG_RUNTIME_DIR` are
+/// considered: a second user's daemon, or one started by a system unit with a
+/// different runtime directory, would otherwise be picked and its config
+/// argument would be mistaken for ours.
 pub fn find_daemon_pid() -> Option<i32> {
+    let uid = unsafe { libc::geteuid() };
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR");
     let entries = fs::read_dir("/proc").ok()?;
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -159,11 +190,58 @@ pub fn find_daemon_pid() -> Option<i32> {
             continue;
         };
         let comm = fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
-        if comm.trim() == "kanshi" {
-            return Some(pid);
+        if comm.trim() != "kanshi" {
+            continue;
         }
+        if process_uid(pid) != Some(uid) {
+            continue;
+        }
+        if let Some(runtime) = &runtime {
+            if let Some(environ) = process_environ(pid) {
+                let has_value = environ
+                    .split('\0')
+                    .any(|entry| entry.starts_with("XDG_RUNTIME_DIR="));
+                let matches = environ
+                    .split('\0')
+                    .filter_map(|entry| entry.strip_prefix("XDG_RUNTIME_DIR="))
+                    .any(|value| std::ffi::OsStr::new(value) == runtime.as_os_str());
+                if has_value && !matches {
+                    continue;
+                }
+            }
+        }
+        return Some(pid);
     }
     None
+}
+
+fn process_uid(pid: i32) -> Option<u32> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|line| line.split_whitespace().next())
+        .and_then(|uid| uid.parse().ok())
+}
+
+fn process_environ(pid: i32) -> Option<String> {
+    let bytes = fs::read(format!("/proc/{pid}/environ")).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The config the daemon at `pid` re-reads on `kanshictl reload`: its
+/// `-c`/`--config` argument, or kanshi's default when it has none.
+///
+/// Returns `None` when the command line cannot be read, so callers do not
+/// mistake "unknown" for "uses the default config".
+pub fn effective_config(pid: i32) -> Option<PathBuf> {
+    let bytes = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let args: Vec<String> = bytes
+        .split(|b| *b == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part).into_owned())
+        .collect();
+    Some(parse_config_arg(&args).unwrap_or_else(default_config_path))
 }
 
 /// Read `-c`/`--config` from `/proc/<pid>/cmdline`.
@@ -174,10 +252,14 @@ pub fn read_config_arg(pid: i32) -> Option<PathBuf> {
         .filter(|part| !part.is_empty())
         .map(|part| String::from_utf8_lossy(part).into_owned())
         .collect();
-    let mut iter = args.iter().peekable();
+    parse_config_arg(&args)
+}
+
+fn parse_config_arg<S: AsRef<str>>(args: &[S]) -> Option<PathBuf> {
+    let mut iter = args.iter().map(AsRef::as_ref).peekable();
     while let Some(arg) = iter.next() {
         if arg == "-c" || arg == "--config" {
-            return iter.peek().map(|value| PathBuf::from(value.as_str()));
+            return iter.peek().map(|value| PathBuf::from(*value));
         }
         if let Some(value) = arg.strip_prefix("--config=") {
             return Some(PathBuf::from(value));
@@ -197,11 +279,6 @@ mod tests {
 
     #[test]
     fn parses_short_and_long_config_args() {
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("kanshi");
-        fs::write(&script, "#!/bin/sh\n").unwrap();
-        // Fake /proc is not writable, so test the parser through a helper
-        // command line instead.
         assert_eq!(
             parse_config_arg(&["kanshi", "-c", "/tmp/a"]),
             Some("/tmp/a".into())
@@ -215,18 +292,22 @@ mod tests {
             Some("/tmp/c".into())
         );
         assert_eq!(parse_config_arg(&["kanshi"]), None);
+        assert_eq!(
+            parse_config_arg(&["kanshi", "-c/tmp/d"]),
+            Some("/tmp/d".into())
+        );
     }
 
-    fn parse_config_arg(args: &[&str]) -> Option<PathBuf> {
-        let mut iter = args.iter().peekable();
-        while let Some(arg) = iter.next() {
-            if *arg == "-c" || *arg == "--config" {
-                return iter.peek().map(|value| PathBuf::from(**value));
-            }
-            if let Some(value) = arg.strip_prefix("--config=") {
-                return Some(PathBuf::from(value));
-            }
-        }
-        None
+    #[test]
+    fn default_config_follows_xdg_config_home() {
+        // The default path is what `effective_config` assumes when the daemon
+        // has no `-c`. Both variables are read from the environment.
+        let expected = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
+            })
+            .join("kanshi/config");
+        assert_eq!(default_config_path(), expected);
     }
 }

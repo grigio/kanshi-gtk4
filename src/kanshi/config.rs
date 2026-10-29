@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
+use crate::backend::cosmic;
 use crate::config::AppState;
 use crate::model::layout::{format_scale, LayoutKind, LayoutPlan, OutputPlan};
 use crate::model::output::{is_internal_name, Mode, Output, Transform};
@@ -410,10 +411,10 @@ fn render_profile(name: &str, comment: &str, plan: &LayoutPlan, native_mirror: b
     // manual arrangement that was never labelled as the Mirror preset: that is
     // what makes a hotplug restore the same picture on both screens.
     if native_mirror {
-        if let Some((external, internal)) = mirror_pair(plan) {
+        if let Some((external, internal)) = cosmic::mirror_pair(plan) {
             text.push_str(&format!(
                 "\texec {}\n",
-                crate::backend::cosmic::mirror_command(&external, &internal)
+                cosmic::mirror_command(&external, &internal)
             ));
         }
     }
@@ -421,32 +422,16 @@ fn render_profile(name: &str, comment: &str, plan: &LayoutPlan, native_mirror: b
     text
 }
 
-/// The (external, internal) pair a mirror plan shows. COSMIC mirrors the
-/// external head onto the built-in panel, which stays the source of truth.
-///
-/// Both heads must be enabled and at the same position, which is what a mirror
-/// means in the layout model; their logical sizes may differ because the
-/// external can cover only part of the panel.
-fn mirror_pair(plan: &LayoutPlan) -> Option<(String, String)> {
-    let mut internal = None;
-    let mut external = None;
-    for (name, output) in &plan.outputs {
-        if !output.enabled {
-            continue;
-        }
-        if is_internal_name(name) {
-            internal.get_or_insert_with(|| (name.clone(), output.position));
-        } else {
-            external.get_or_insert_with(|| (name.clone(), output.position));
-        }
-    }
-    let (internal, internal_position) = internal?;
-    let (external, external_position) = external?;
-    (internal_position == external_position).then_some((external, internal))
-}
-
 /// Replace the managed block, or insert it at the top on first run. Text
 /// outside the markers is preserved.
+///
+/// Markers are matched on a whole line, not as a substring: a user comment
+/// that merely mentions the marker text must not be mistaken for the block.
+/// A file with duplicated or unbalanced markers is repaired rather than
+/// extended: every old block body and marker is dropped, the user's text is
+/// kept and a single fresh block goes to the top. The body of a truncated
+/// block is kept as preserved text, because it may contain the profiles the
+/// user was editing when the write was interrupted.
 pub fn merge_managed_block(existing: Option<&[u8]>, block: &str) -> String {
     let block = block.trim_end().to_string();
     let Some(existing) = existing else {
@@ -454,29 +439,68 @@ pub fn merge_managed_block(existing: Option<&[u8]>, block: &str) -> String {
     };
     let text = String::from_utf8_lossy(existing);
     let lines: Vec<&str> = text.lines().collect();
-    let start = lines.iter().position(|line| line.contains(BLOCK_START));
-    let end = lines.iter().position(|line| line.contains(BLOCK_END));
-    match (start, end) {
-        (Some(start), Some(end)) if start <= end => {
-            let mut rest: Vec<String> = Vec::new();
-            rest.extend(lines[..start].iter().map(|s| s.to_string()));
-            rest.extend(lines[end + 1..].iter().map(|s| s.to_string()));
-            let rest = rest.join("\n");
-            let rest = rest.trim_matches('\n');
-            if rest.is_empty() {
-                format!("{block}\n")
-            } else {
-                format!("{block}\n\n{rest}\n")
+
+    // Pair every start marker with the next end marker. Blocks that never
+    // close, markers that close nothing and a second block all make the file
+    // "malformed": its bodies cannot be trusted, so they are dropped.
+    let mut regions: Vec<(usize, usize)> = Vec::new();
+    // Marker lines that belong to no complete block (an orphaned end, or a
+    // start that was taken over by another start).
+    let mut strays: Vec<usize> = Vec::new();
+    let mut open: Option<usize> = None;
+    for (index, line) in lines.iter().enumerate() {
+        if is_marker(line, BLOCK_START) {
+            if let Some(previous) = open.replace(index) {
+                strays.push(previous);
             }
-        }
-        _ => {
-            if text.trim().is_empty() {
-                format!("{block}\n")
-            } else {
-                format!("{block}\n\n{PRESERVED}\n{}", text.trim_start_matches('\n'))
+        } else if is_marker(line, BLOCK_END) {
+            match open.take() {
+                Some(start) => regions.push((start, index)),
+                None => strays.push(index),
             }
         }
     }
+    // A start marker with no end: drop the marker but keep what follows, as
+    // it is user text that never became a managed block.
+    if let Some(start) = open {
+        strays.push(start);
+    }
+
+    let mut drop = vec![false; lines.len()];
+    for index in &strays {
+        drop[*index] = true;
+    }
+    for (start, end) in &regions {
+        for flag in &mut drop[*start..=*end] {
+            *flag = true;
+        }
+    }
+
+    let rest: Vec<&str> = lines
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !drop[*index])
+        .map(|(_, line)| *line)
+        .collect();
+    let rest = rest.join("\n");
+    let rest = rest.trim_matches('\n');
+
+    if regions.len() == 1 && strays.is_empty() {
+        // The normal case: keep the block where the user had it.
+        if rest.is_empty() {
+            format!("{block}\n")
+        } else {
+            format!("{block}\n\n{rest}\n")
+        }
+    } else if rest.trim().is_empty() {
+        format!("{block}\n")
+    } else {
+        format!("{block}\n\n{PRESERVED}\n{rest}\n")
+    }
+}
+
+fn is_marker(line: &str, marker: &str) -> bool {
+    line.trim() == marker
 }
 
 /// Write the candidate config atomically, creating a one-time pre-change
@@ -568,6 +592,7 @@ mod tests {
             "eDP-1".to_string(),
             OutputState {
                 mode: "3120x2080@120".into(),
+                identity: None,
                 custom: false,
                 scale: 2.0,
                 desktop_scale: Some(2.0),
@@ -580,6 +605,7 @@ mod tests {
             "DP-1".to_string(),
             OutputState {
                 mode: "1920x1200@60".into(),
+                identity: None,
                 custom: false,
                 scale: 1.5,
                 desktop_scale: Some(1.5),
@@ -735,10 +761,12 @@ mod tests {
             "{mirror}"
         );
 
-        // Only mirror profiles ask the compositor for a mirror.
+        // A non-mirror profile carries no exec line: kanshi reconfigures the
+        // head through zwlr_output_manager_v1, and the app breaks stale
+        // mirrors before it applies a layout.
         let start = block.find("profile auto-extend").unwrap();
         let extend = block[start..].split("\nprofile ").next().unwrap();
-        assert!(!extend.contains("exec "), "{extend}");
+        assert!(!extend.contains("\texec "), "{extend}");
 
         // Without native mirroring (sway, labwc, niri) the config is unchanged.
         let block = generate_managed_block(&AppState::default(), Some(&current), false);
@@ -772,6 +800,7 @@ mod tests {
             "eDP-1".to_string(),
             OutputState {
                 mode: "3120x2080@120".into(),
+                identity: None,
                 custom: false,
                 scale: 2.0,
                 desktop_scale: Some(2.0),
@@ -784,6 +813,7 @@ mod tests {
             "HDMI-A-1".to_string(),
             OutputState {
                 mode: "1920x1080@60".into(),
+                identity: None,
                 custom: false,
                 scale: 1.0,
                 desktop_scale: Some(1.0),
@@ -849,6 +879,62 @@ mod tests {
         assert!(merged.starts_with("BLOCK"));
         assert!(merged.contains(PRESERVED));
         assert!(merged.contains("profile old {}"));
+    }
+
+    #[test]
+    fn a_truncated_block_is_repaired_without_losing_content() {
+        // The end marker is gone (interrupted write, hand edit): the old block
+        // body must not be nested inside the new one.
+        let existing = format!("# header\n{BLOCK_START}\nprofile half {{}}\n");
+        let block = format!("{BLOCK_START}\nnew\n{BLOCK_END}");
+        let merged = merge_managed_block(Some(existing.as_bytes()), &block);
+        assert_eq!(merged.matches(BLOCK_START).count(), 1);
+        assert_eq!(merged.matches(BLOCK_END).count(), 1);
+        assert!(merged.starts_with(BLOCK_START));
+        assert!(merged.contains("profile half {}"));
+        assert!(merged.contains("# header"));
+        assert!(!merged.contains("new\nprofile half"), "{merged}");
+    }
+
+    #[test]
+    fn duplicate_markers_are_collapsed() {
+        let existing = format!(
+            "{BLOCK_START}\nold\n{BLOCK_END}\n# between\n{BLOCK_START}\nolder\n{BLOCK_END}\n"
+        );
+        let block = format!("{BLOCK_START}\nnew\n{BLOCK_END}");
+        let merged = merge_managed_block(Some(existing.as_bytes()), &block);
+        assert_eq!(merged.matches(BLOCK_START).count(), 1);
+        assert_eq!(merged.matches(BLOCK_END).count(), 1);
+        assert!(merged.contains("new"));
+        assert!(!merged.contains("old"));
+        assert!(merged.contains("# between"));
+    }
+
+    #[test]
+    fn an_orphaned_end_marker_is_dropped() {
+        // An end marker with no start (an interrupted append) must not be
+        // mistaken for a block boundary.
+        let existing = format!("profile mine {{}}\n{BLOCK_END}\n# tail\n");
+        let block = format!("{BLOCK_START}\nnew\n{BLOCK_END}");
+        let merged = merge_managed_block(Some(existing.as_bytes()), &block);
+        assert_eq!(merged.matches(BLOCK_END).count(), 1);
+        assert_eq!(merged.matches(BLOCK_START).count(), 1);
+        assert!(merged.starts_with(BLOCK_START));
+        assert!(merged.contains("profile mine {}"));
+        assert!(merged.contains("# tail"));
+    }
+
+    #[test]
+    fn marker_text_inside_a_comment_is_not_a_marker() {
+        // A line that merely mentions the marker (e.g. quoted in a comment)
+        // must not be treated as the block boundary.
+        let existing = format!("## {BLOCK_START}\nprofile mine {{}}\n");
+        let block = format!("{BLOCK_START}\nnew\n{BLOCK_END}");
+        let merged = merge_managed_block(Some(existing.as_bytes()), &block);
+        assert_eq!(merged.matches(BLOCK_START).count(), 2);
+        assert!(merged.contains("## "), "{merged}");
+        assert!(merged.contains("profile mine {}"));
+        assert!(merged.starts_with(BLOCK_START));
     }
 
     #[test]

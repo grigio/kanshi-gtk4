@@ -13,8 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::backend::wlr_randr::WlrRandrBackend;
-use crate::backend::OutputBackend;
+use crate::backend::{self, OutputBackend};
 use crate::config::now_rfc3339;
 use crate::kanshi::config::restore_config;
 use crate::kanshi::ctl::KanshiClient;
@@ -76,13 +75,37 @@ fn read_state(dir: &Path) -> Result<Snapshot> {
     let path = dir.join("state.json");
     let bytes = fs::read(&path)
         .with_context(|| format!("reading transaction snapshot {}", path.display()))?;
-    serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing transaction snapshot {}", path.display()))
+    let snapshot: Snapshot = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing transaction snapshot {}", path.display()))?;
+    if snapshot.version > crate::model::snapshot::SNAPSHOT_VERSION {
+        bail!(
+            "transaction {} uses snapshot version {} but this build understands up to {}",
+            dir.display(),
+            snapshot.version,
+            crate::model::snapshot::SNAPSHOT_VERSION
+        );
+    }
+    Ok(snapshot)
 }
 
 /// Restore the snapshot in a transaction directory. Idempotent: racing with
 /// the UI's own revert is harmless.
+///
+/// The transaction lock is held for the whole restore, so a keep that starts
+/// at the same moment either finishes first (and its marker is honoured) or
+/// waits for the restore.
 pub fn restore_transaction(dir: &Path) -> Result<RestoreReport> {
+    if !dir.is_dir() {
+        bail!("{} is not a transaction directory", dir.display());
+    }
+    let _lock = util::DirLock::acquire(dir)?;
+    restore_transaction_locked(dir)
+}
+
+/// [`restore_transaction`] without taking the lock. Callers that already hold
+/// the transaction's [`util::DirLock`] must use this to avoid deadlocking on
+/// their own lock.
+pub(crate) fn restore_transaction_locked(dir: &Path) -> Result<RestoreReport> {
     let snapshot = read_state(dir)?;
     let mut report = RestoreReport::default();
 
@@ -119,7 +142,7 @@ pub fn restore_transaction(dir: &Path) -> Result<RestoreReport> {
                     report.reloaded = client.reload().is_ok();
                 }
             }
-            let backend = WlrRandrBackend::new();
+            let backend = backend::create();
             let matched = backend
                 .list()
                 .ok()
@@ -130,7 +153,7 @@ pub fn restore_transaction(dir: &Path) -> Result<RestoreReport> {
                 .unwrap_or(false);
             if !report.reloaded || !matched {
                 report.fallback_used = true;
-                apply_snapshot(&snapshot, &backend, &mut report)?;
+                apply_snapshot(&snapshot, backend.as_ref(), &mut report)?;
             } else {
                 report.outputs_restored = snapshot.outputs.iter().filter(|o| o.enabled).count();
             }
@@ -154,8 +177,8 @@ pub fn restore_transaction(dir: &Path) -> Result<RestoreReport> {
                     }
                 }
             }
-            let backend = WlrRandrBackend::new();
-            apply_snapshot(&snapshot, &backend, &mut report)?;
+            let backend = backend::create();
+            apply_snapshot(&snapshot, backend.as_ref(), &mut report)?;
         }
     }
 
@@ -164,7 +187,7 @@ pub fn restore_transaction(dir: &Path) -> Result<RestoreReport> {
 
 fn apply_snapshot(
     snapshot: &Snapshot,
-    backend: &WlrRandrBackend,
+    backend: &dyn OutputBackend,
     report: &mut RestoreReport,
 ) -> Result<()> {
     let live = backend
@@ -182,6 +205,10 @@ fn apply_snapshot(
     }
     backend.dry_run(&plan)?;
     backend.apply(&plan)?;
+    // The output protocol cannot mirror: put back the native mirrors recorded
+    // in the snapshot, or a revert of an "External only" apply would leave
+    // the two heads overlapping instead of mirrored.
+    crate::backend::cosmic::restore_mirrors(&snapshot.mirrored, &plan);
     let after = backend.list()?;
     if !plan.matches_live_relaxed(&after) {
         bail!("restored configuration does not match the compositor state");
@@ -192,7 +219,8 @@ fn apply_snapshot(
 
 /// Restore, then stop the watchdog and remove the transaction directory.
 pub fn revert_and_finish(dir: &Path) -> Result<RestoreReport> {
-    let report = restore_transaction(dir)?;
+    let _lock = util::DirLock::acquire(dir)?;
+    let report = restore_transaction_locked(dir)?;
     // Marker last: if the app dies during the restore, the watchdog retries.
     write_marker(dir, MARKER_CANCEL)?;
     let _ = fs::remove_dir_all(dir);
@@ -251,7 +279,14 @@ pub fn spawn_watchdog(dir: &Path, timeout_secs: u32) -> Result<i32> {
         });
     }
     let child = command.spawn().context("spawning the rollback watchdog")?;
-    Ok(child.id() as i32)
+    let pid = child.id() as i32;
+    // Reap the watchdog when it exits, or every apply leaves a zombie child
+    // behind until the app quits.
+    let mut child = child;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(pid)
 }
 
 /// Locate a runnable copy of this program for the watchdog.
@@ -325,14 +360,41 @@ pub fn run_watchdog(dir: &Path, timeout_secs: u32) -> i32 {
         }
     }
 
+    // Re-check the marker under the transaction lock. A Keep that starts at
+    // exactly the timeout boundary may win the lock first; without this check
+    // the watchdog would restore the old layout after the user already
+    // confirmed the new one.
+    let lock = match util::DirLock::acquire(dir) {
+        Ok(lock) => lock,
+        Err(err) => {
+            // A Keep that wins the race writes the marker and removes the
+            // transaction; that is success, not a failure to report.
+            if !dir.exists() {
+                return 0;
+            }
+            log(dir, &format!("could not lock the transaction: {err:#}"));
+            return 2;
+        }
+    };
+    // The directory can disappear while this process waits for the lock.
+    if !dir.exists() {
+        return 0;
+    }
+    if let Some(marker) = read_marker(dir) {
+        if marker == MARKER_KEEP || marker == MARKER_CANCEL {
+            return 0;
+        }
+    }
+
     log(
         dir,
         &format!("no keep/cancel marker after {timeout_secs}s, restoring the previous layout"),
     );
-    match restore_transaction(dir) {
+    match restore_transaction_locked(dir) {
         Ok(report) => {
             log(dir, &format!("restored: {}", report.summary()));
             let _ = write_marker(dir, MARKER_CANCEL);
+            drop(lock);
             util::notify(
                 "Display layout reverted",
                 "The new layout was not confirmed, so the previous one was restored.",
@@ -341,6 +403,7 @@ pub fn run_watchdog(dir: &Path, timeout_secs: u32) -> i32 {
         }
         Err(err) => {
             log(dir, &format!("restore failed: {err:#}"));
+            drop(lock);
             util::notify(
                 "Could not restore the display layout",
                 &format!("{err:#}. Try: kanshi-gtk4 --revert {}", dir.display()),
@@ -380,9 +443,18 @@ pub fn recover_older_transactions(root: &Path, keep: &Path) {
             let _ = fs::remove_dir_all(&path);
             continue;
         }
-        // Stop its watchdog first, then restore its snapshot.
+        // Serialise with a watchdog that is about to restore the same
+        // transaction. Whoever gets the lock first wins; the marker re-check
+        // makes the loser a no-op.
+        let Ok(_lock) = util::DirLock::acquire(&path) else {
+            continue;
+        };
+        if read_marker(&path).is_some() {
+            let _ = fs::remove_dir_all(&path);
+            continue;
+        }
+        let _ = restore_transaction_locked(&path);
         let _ = write_marker(&path, MARKER_CANCEL);
-        let _ = restore_transaction(&path);
         let _ = fs::remove_dir_all(&path);
     }
 }
@@ -410,7 +482,9 @@ pub fn scan_stale(root: &Path) -> Vec<PathBuf> {
                 continue;
             }
         };
-        let active = util::pid_alive(snapshot.app_pid) || util::pid_alive(snapshot.watchdog_pid);
+        // A recycled PID must not keep a dead transaction alive forever.
+        let active = util::pid_alive_since(snapshot.app_pid, snapshot.app_start)
+            || util::pid_alive_since(snapshot.watchdog_pid, snapshot.watchdog_start);
         if !active {
             stale.push(path);
         }
@@ -423,7 +497,8 @@ pub fn revert_cli(dir: &Path) -> Result<RestoreReport> {
     if !dir.is_dir() {
         bail!("{} is not a transaction directory", dir.display());
     }
-    let report = restore_transaction(dir)?;
+    let _lock = util::DirLock::acquire(dir)?;
+    let report = restore_transaction_locked(dir)?;
     let _ = write_marker(dir, MARKER_CANCEL);
     let _ = fs::remove_dir_all(dir);
     Ok(report)

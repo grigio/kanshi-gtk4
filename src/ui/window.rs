@@ -14,8 +14,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::apply::{self, ApplyParams, PreparedTx};
-use crate::backend::wlr_randr::WlrRandrBackend;
-use crate::backend::{BackendInfo, OutputBackend};
+use crate::backend;
+use crate::backend::BackendInfo;
 use crate::config::{self, AppState, Paths, APP_ID};
 use crate::kanshi::ctl::{KanshiClient, KanshiInfo};
 use crate::model::layout::{
@@ -56,6 +56,8 @@ pub struct AppModel {
     pub countdown: Option<CountdownHandle>,
     pub expanded: HashSet<String>,
     pub last_refresh_error: Option<String>,
+    /// The compositor caveat from [`BackendInfo::warning`] is shown once.
+    pub warning_shown: bool,
 }
 
 impl AppModel {
@@ -78,6 +80,7 @@ impl AppModel {
             countdown: None,
             expanded: HashSet::new(),
             last_refresh_error: None,
+            warning_shown: false,
         }
     }
 
@@ -999,7 +1002,7 @@ fn request_refresh(model: &Rc<RefCell<AppModel>>, widgets: &Rc<Widgets>) {
     let widgets = widgets.clone();
     spawn_background(
         move || {
-            let backend = WlrRandrBackend::new();
+            let backend = backend::create();
             let backend_info = backend
                 .detect()
                 .unwrap_or_else(|err| BackendInfo::unsupported(format!("{err:#}")));
@@ -1024,12 +1027,17 @@ fn request_refresh(model: &Rc<RefCell<AppModel>>, widgets: &Rc<Widgets>) {
 fn handle_refresh(result: RefreshResult, model: &Rc<RefCell<AppModel>>, widgets: &Rc<Widgets>) {
     let mut abort_tx: Option<PreparedTx> = None;
     let mut message: Option<String> = None;
+    let mut warning: Option<String> = None;
 
     {
         let mut model = model.borrow_mut();
         model.refreshing = false;
         model.backend_info = result.backend_info;
         model.kanshi_info = result.kanshi_info;
+        if !model.warning_shown {
+            model.warning_shown = true;
+            warning = model.backend_info.warning.clone();
+        }
         match result.outputs {
             Ok(outputs) => {
                 model.last_refresh_error = None;
@@ -1067,6 +1075,9 @@ fn handle_refresh(result: RefreshResult, model: &Rc<RefCell<AppModel>>, widgets:
         return;
     }
     update_ui(model, widgets);
+    if let Some(warning) = warning {
+        toast(widgets, warning);
+    }
     if let Some(message) = message {
         toast(widgets, message);
     }
@@ -1407,6 +1418,7 @@ mod tests {
                 supported: true,
                 reason: None,
                 protocol_version: Some(4),
+                warning: None,
             },
             kanshi_info: KanshiInfo::default(),
             outputs,

@@ -6,6 +6,9 @@ use std::collections::BTreeMap;
 use super::layout::{LayoutPlan, OutputPlan};
 use super::output::{Mode, Output, Transform};
 
+/// Schema version of `pending-*/state.json`.
+pub const SNAPSHOT_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EngineKind {
@@ -105,9 +108,20 @@ pub struct Snapshot {
     #[serde(default)]
     pub state_existed: bool,
     pub app_pid: i32,
+    /// `/proc/<pid>/stat` start time of the app, so a recycled PID is not
+    /// mistaken for the process that created the transaction.
+    #[serde(default)]
+    pub app_start: Option<u64>,
     pub watchdog_pid: i32,
+    #[serde(default)]
+    pub watchdog_start: Option<u64>,
     pub connected: Vec<String>,
     pub outputs: Vec<SnapshotOutput>,
+    /// Native compositor mirrors that existed before the apply, as
+    /// `mirrored head -> source`. The output protocol cannot express them, so a revert
+    /// has to re-create them explicitly.
+    #[serde(default)]
+    pub mirrored: Vec<(String, String)>,
 }
 
 impl Snapshot {
@@ -124,7 +138,7 @@ impl Snapshot {
         outputs: &[Output],
     ) -> Self {
         Self {
-            version: 1,
+            version: SNAPSHOT_VERSION,
             created: crate::config::now_rfc3339(),
             engine,
             kanshi_running,
@@ -133,10 +147,18 @@ impl Snapshot {
             config_existed,
             state_existed,
             app_pid,
+            app_start: crate::util::process_start_time(app_pid),
             watchdog_pid,
+            watchdog_start: crate::util::process_start_time(watchdog_pid),
             connected: outputs.iter().map(|o| o.name.clone()).collect(),
             outputs: outputs.iter().map(SnapshotOutput::from_output).collect(),
+            mirrored: Vec::new(),
         }
+    }
+
+    pub fn record_watchdog(&mut self, pid: i32) {
+        self.watchdog_pid = pid;
+        self.watchdog_start = crate::util::process_start_time(pid);
     }
 
     /// Snapshot outputs as a complete plan. Missing outputs are never

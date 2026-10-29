@@ -30,6 +30,7 @@ impl OutputBackend for FakeBackend {
             supported: true,
             reason: None,
             protocol_version: Some(4),
+            warning: None,
         })
     }
 

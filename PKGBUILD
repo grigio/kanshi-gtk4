@@ -16,9 +16,11 @@ pkgdesc="Arrange displays on Wayland and save the layout as a kanshi profile"
 arch=('x86_64')
 url="https://github.com/grigio/kanshi-gtk4"
 license=('GPL-3.0-only')
-depends=('gtk4' 'libadwaita' 'wlr-randr' 'hicolor-icon-theme')
+depends=('gtk4' 'libadwaita' 'hicolor-icon-theme')
 makedepends=('cargo' 'pkgconf')
-optdepends=('kanshi: persist layouts across reboot and hotplug')
+optdepends=('kanshi: persist layouts across reboot and hotplug'
+            'cosmic-randr: native mirroring on COSMIC'
+            'wlr-randr: legacy shell-out backend (KANSHI_GTK4_BACKEND=wlr-randr)')
 checkdepends=('desktop-file-utils' 'python')
 source=()
 sha256sums=()

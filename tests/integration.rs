@@ -102,7 +102,7 @@ fn cosmic_mirror_apply_asks_for_a_native_mirror() {
     assert_eq!(tx.engine, EngineKind::Wlr);
 
     // COSMIC needs the extra command: overlapping heads do not mirror.
-    assert_eq!(session.cosmic_calls(), vec!["mirror DP-1 eDP-1"]);
+    assert_eq!(session.cosmic_writes(), vec!["mirror DP-1 eDP-1"]);
 
     apply::finalize_keep(&tx).expect("keep");
     let config = session.config_text();
@@ -128,7 +128,7 @@ fn manual_overlap_apply_asks_for_a_native_mirror() {
     plan.kind = LayoutKind::Custom;
 
     let tx = apply::prepare_and_apply(session.apply_params(plan, 30)).expect("apply");
-    assert_eq!(session.cosmic_calls(), vec!["mirror DP-1 eDP-1"]);
+    assert_eq!(session.cosmic_writes(), vec!["mirror DP-1 eDP-1"]);
 
     apply::finalize_keep(&tx).expect("keep");
     let config = session.config_text();
@@ -149,9 +149,9 @@ fn extend_apply_does_not_touch_the_compositor_mirror() {
     let tx =
         apply::prepare_and_apply(session.apply_params(session.extend_plan(), 30)).expect("apply");
     assert!(
-        session.cosmic_calls().is_empty(),
+        session.cosmic_writes().is_empty(),
         "{:?}",
-        session.cosmic_calls()
+        session.cosmic_writes()
     );
     apply::finalize_keep(&tx).expect("keep");
     let config = session.config_text();
@@ -411,7 +411,11 @@ fn dry_run_failure_changes_nothing() {
 
     assert_eq!(session.config(), before);
     assert!(!session.output("DP-1").enabled);
-    assert!(session.pending_dirs().is_empty());
+    assert!(
+        session.pending_dirs().is_empty(),
+        "transaction left behind: {:?}",
+        session.pending_dirs()
+    );
 }
 
 #[test]

@@ -84,8 +84,8 @@ Priority: optional
 Architecture: $arch
 Maintainer: grigio <grigio@users.noreply.github.com>
 Installed-Size: $installed_size
-Depends: libc6 (>= $libc_version), libgtk-4-1 (>= 4.18), libadwaita-1-0 (>= 1.7), wlr-randr, hicolor-icon-theme
-Recommends: kanshi
+Depends: libc6 (>= $libc_version), libgtk-4-1 (>= 4.18), libadwaita-1-0 (>= 1.7), hicolor-icon-theme
+Recommends: kanshi, cosmic-randr
 Homepage: https://github.com/grigio/$pkg
 Description: arrange displays on Wayland and save the layout as a kanshi profile
  A small GTK4 / libadwaita app for Wayland compositors that expose

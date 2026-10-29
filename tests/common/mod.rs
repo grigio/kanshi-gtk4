@@ -35,6 +35,7 @@ profile single {\n\
 }\n";
 
 const ENV_VARS: &[&str] = &[
+    "KANSHI_GTK4_BACKEND",
     "KANSHI_GTK4_WLR_RANDR",
     "KANSHI_GTK4_KANSHICTL",
     "KANSHI_GTK4_WAYLAND_INFO",
@@ -55,6 +56,7 @@ const ENV_VARS: &[&str] = &[
     "MOCK_KANSHI_RELOAD_FAIL",
     "MOCK_KANSHI_IGNORE_ENABLE",
     "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
 ];
 
 fn env_lock() -> MutexGuard<'static, ()> {
@@ -95,6 +97,10 @@ impl MockSession {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().to_path_buf();
+        // Keep the real kanshi (if the developer has one running) out of
+        // `find_daemon_pid`: it belongs to a different runtime directory and
+        // its config path would make the mock session look unsupported.
+        std::env::set_var("XDG_RUNTIME_DIR", root.join("runtime"));
         let bin = root.join("bin");
         fs::create_dir(&bin).expect("bin dir");
 
@@ -128,6 +134,9 @@ impl MockSession {
         let kanshi_log = root.join("kanshictl.log");
         let cosmic_log = root.join("cosmic-randr.log");
 
+        // The integration tests drive the real state machine with mock
+        // subprocesses; the native backend needs a compositor.
+        std::env::set_var("KANSHI_GTK4_BACKEND", "wlr-randr");
         std::env::set_var("KANSHI_GTK4_WLR_RANDR", &wlr);
         std::env::set_var("KANSHI_GTK4_KANSHICTL", &kanshictl);
         std::env::set_var("KANSHI_GTK4_WAYLAND_INFO", &wayland_info);
@@ -270,6 +279,15 @@ impl MockSession {
         fs::read_to_string(&self.cosmic_log)
             .map(|text| text.lines().map(str::to_string).collect())
             .unwrap_or_default()
+    }
+
+    /// `cosmic-randr` calls that change the output state. Read-only `list`
+    /// probes are part of every apply and are not interesting to assertions.
+    pub fn cosmic_writes(&self) -> Vec<String> {
+        self.cosmic_calls()
+            .into_iter()
+            .filter(|call| !call.starts_with("list"))
+            .collect()
     }
 
     pub fn apply_params(&self, plan: LayoutPlan, timeout_secs: u32) -> ApplyParams {

@@ -41,7 +41,7 @@ jobs:
       - name: Install dependencies
         run: |
           pacman -Syu --noconfirm --needed \
-            git rust pkgconf gtk4 libadwaita wlr-randr desktop-file-utils python
+            git rust pkgconf gtk4 libadwaita desktop-file-utils python
 
       - uses: actions/checkout@v5
 
@@ -73,7 +73,7 @@ jobs:
       - name: Install dependencies
         run: |
           pacman -Syu --noconfirm --needed \
-            git rust pkgconf gtk4 libadwaita wlr-randr desktop-file-utils python
+            git rust pkgconf gtk4 libadwaita desktop-file-utils python
 
       - uses: actions/checkout@v5
 

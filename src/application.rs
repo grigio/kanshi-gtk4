@@ -74,8 +74,9 @@ fn activate(
                 application,
                 "Could not read the display configuration",
                 &format!(
-                    "{err:#}\n\nMake sure wlr-randr is installed (sudo pacman -S wlr-randr) and \
-                     that the compositor supports zwlr_output_manager_v1."
+                    "{err:#}\n\nThis app speaks zwlr_output_manager_v1 directly. Check that \
+                     the compositor supports it (labwc, sway, niri and Hyprland do; GNOME \
+                     and KDE do not)."
                 ),
             );
             window.present();
@@ -93,9 +94,10 @@ fn activate(
             application,
             "Output management is not available",
             &format!(
-                "{reason}\n\nThis app supports labwc and niri and needs a compositor that \
-                 implements zwlr_output_manager_v1. Other compositors may work, but are \
-                 untested. GNOME, KDE and Hyprland are not supported."
+                "{reason}\n\nThis app needs a Wayland compositor that implements \
+                 zwlr_output_manager_v1, the output-management protocol from wlroots \
+                 (labwc, sway, niri and Hyprland provide it). GNOME and KDE do not, \
+                 so outputs cannot be changed there."
             ),
         );
         window.present();
@@ -104,9 +106,10 @@ fn activate(
 
     if verbose {
         eprintln!(
-            "config: {} · state: {} · backend: wlr-randr",
+            "config: {} · state: {} · backend: {}",
             paths.config_path.display(),
-            paths.state_path.display()
+            paths.state_path.display(),
+            crate::backend::selected_name()
         );
     }
     Some(window::build(application, session))
