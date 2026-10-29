@@ -1,6 +1,6 @@
 [package]
 name = "kanshi-gtk4"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.92"
 description = "Arrange displays and persist the layout as a kanshi profile"
