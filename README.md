@@ -28,11 +28,12 @@ writes it to `~/.config/kanshi/config`, so it survives reboot and hotplug.
 
 - **GTK 4.18+ / libadwaita 1.7+** — the oldest GUI stack the source builds
   against, which also makes the app installable on Debian 13 (trixie).
-- **labwc, niri, sway (1.11+) or COSMIC (cosmic-comp 1.11+)** — supported
-  compositors. All implement `zwlr_output_manager_v1`, the protocol this app
-  drives. Other compositors exposing the same protocol may work but are
-  untested. **GNOME, KDE and Hyprland are not supported** (they do not expose
-  the protocol).
+- **labwc, niri, sway (1.11+), COSMIC (cosmic-comp 1.11+) or Hyprland
+  (0.52.1+)** — supported compositors. All implement `zwlr_output_manager_v1`,
+  the protocol this app drives; Hyprland does so only partially (see the note
+  below). Other compositors exposing the same protocol may work but are
+  untested. **GNOME and KDE are not supported** (they do not expose the
+  protocol).
 - [`wlr-randr`](https://gitlab.freedesktop.org/emersion/wlr-randr) — required.
 - [kanshi](https://gitlab.freedesktop.org/emersion/kanshi) — optional, needed
   to persist the layout across reboot and hotplug.
@@ -52,7 +53,7 @@ sudo pacman -S wlr-randr kanshi
 | wayfire | yes, v4 (0.9+) | untested, should work |
 | Cage / phoc | yes, v4 | untested, should work |
 | COSMIC (cosmic-comp 1.11+) | yes, v4 verified | supported |
-| Hyprland | no (`hyprctl` instead) | not supported |
+| Hyprland | yes, v4 (0.52.1+) | partial, see the note |
 | GNOME / KDE | no | not supported |
 | X11 / XWayland session | n/a | not supported |
 
@@ -75,6 +76,22 @@ sudo pacman -S wlr-randr kanshi
 > left of the panel is no longer reverted. Disabling an output used to abort
 > cosmic-comp through an `unwrap()` on the removed output's workspace set; those
 > fixes ship in `cosmic-comp-traffic` 1:1.11.0-8 and later.
+
+> **Hyprland users:** support is **partial**. Hyprland advertises
+> `zwlr_output_manager_v1` v4 from 0.52.1 on, so the app lists the heads and
+> can apply, keep and persist a layout like on wlroots. What it cannot do is
+> win against Hyprland's own monitor state: `monitor=` lines in
+> `hyprland.conf` (or `hl.monitor()`) are re-applied on config reload and
+> override whatever came in over the protocol, and a `monitor=` rule plus a
+> protocol-side setting can leave the output in a conflicting state.
+> Rotation is the most fragile part: a `transform` sent through the protocol
+> has been reported to break the image when a `monitor=` rule also exists for
+> that output (regression from 0.55.4, see
+> [hyprwm/Hyprland#15493](https://github.com/hyprwm/Hyprland/discussions/15493)).
+> Practical advice: drop or update `monitor=` rules for outputs you want to
+> arrange here, and set `transform` in the Hyprland config rather than in the
+> app. Unlike labwc, niri and COSMIC, Hyprland was not part of the hardware
+> testing below.
 
 Tested on labwc 0.20.2, niri and cosmic-comp-traffic 1.11.0 with a Xiaomi Book
 Pro 14 (eDP-1, 3120×2080) and a Dell E248WFP (1920×1200). Connector names,
@@ -416,7 +433,10 @@ current panel.
   aliases are future work.
 - `wlr-randr` is a runtime dependency; a native protocol backend is future
   work.
-- GNOME, KDE and Hyprland are not supported.
+- Hyprland support is partial: outputs can be read, arranged and saved, but
+  Hyprland re-applies its own `monitor=` / `hl.monitor()` rules on config
+  reload, which can override the applied layout, and rotation set through the
+  protocol can conflict with those rules. GNOME and KDE are not supported.
 
 ## Troubleshooting
 
@@ -424,9 +444,13 @@ current panel.
   compositor exposes `zwlr_output_manager_v1`:
   `wayland-info | grep zwlr_output_manager`. Make sure `wlr-randr` is
   installed.
-- **This compositor does not support output management** — GNOME, KDE and
-  Hyprland do not expose the protocol. Use labwc, niri or another compositor
-  that does.
+- **This compositor does not support output management** — GNOME and KDE do
+  not expose the protocol. Use labwc, niri, sway 1.11+, COSMIC or Hyprland
+  0.52.1+.
+- **Hyprland ignores or breaks the applied layout** — Hyprland re-applies
+  monitor state from `hyprland.conf`. Remove or update `monitor=` /
+  `hl.monitor()` rules for the affected outputs, and set rotation there
+  instead of in the app.
 - **kanshi not running** — the layout still applies but will not re-apply at
   login. Start kanshi or add it to autostart.
 - **Config not writable** — the app falls back to the wlr-randr engine and
